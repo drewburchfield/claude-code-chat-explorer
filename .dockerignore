@@ -1,0 +1,32 @@
+# Ignore node_modules - must be built inside container for correct architecture
+**/node_modules
+
+# Ignore git
+.git
+.gitignore
+
+# Ignore local database files
+*.db
+*.db-wal
+*.db-shm
+
+# Ignore coverage and test artifacts
+**/coverage
+**/.nyc_output
+
+# Ignore IDE files
+.idea
+.vscode
+*.swp
+*.swo
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore environment files
+.env
+.env.*
+
+# Ignore playwright artifacts
+.playwright-mcp

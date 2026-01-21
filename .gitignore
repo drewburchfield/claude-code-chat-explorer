@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Database files (local only - container uses volume)
+*.db
+*.db-wal
+*.db-shm
+
+# Environment files
+.env
+.env.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test coverage
+coverage/
+
+# Build artifacts
+dist/
+build/
+
+# Claude local files (except CLAUDE.md)
+.claude/
+!repo/.claude/
+!repo/cli-tool/.claude/
+
+# Temporary files
+tmp/
+temp/
+
+# Playwright MCP artifacts
+.playwright-mcp/

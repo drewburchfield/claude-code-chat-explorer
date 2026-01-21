@@ -1,0 +1,7 @@
+{"type":"user","message":{"role":"user","content":"This is a valid line","id":"msg_user_001"},"timestamp":"2024-01-18T08:00:00.000Z","cwd":"/Users/testuser/projects/malformed-test"}
+{this is not valid json
+{"type":"assistant","message":{"role":"assistant","content":"Valid response after invalid line","id":"msg_asst_001","model":"claude-sonnet-4-20250514","usage":{"input_tokens":10,"output_tokens":8}},"timestamp":"2024-01-18T08:00:05.000Z"}
+
+{"type":"user","message":{"role":"user","content":"Another valid message","id":"msg_user_002"},"timestamp":"2024-01-18T08:01:00.000Z"}
+{"incomplete": true, "missing_fields"
+{"type":"assistant","message":{"role":"assistant","content":"Final valid response","id":"msg_asst_002","model":"claude-sonnet-4-20250514","usage":{"input_tokens":8,"output_tokens":6}},"timestamp":"2024-01-18T08:01:05.000Z"}

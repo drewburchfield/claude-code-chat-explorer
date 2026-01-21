@@ -1,0 +1,41 @@
+services:
+  chat-explorer:
+    build:
+      context: .
+      args:
+        USER_ID: 501
+    container_name: claude-code-chat-explorer
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9876:9876"  # Localhost only
+    volumes:
+      # Mount at SAME absolute path so symlinks resolve correctly
+      - ${HOME}/.claude:${HOME}/.claude:ro
+      # Writable volume for SQLite database
+      - chat-explorer-db:/data
+    environment:
+      - NODE_ENV=production
+      - NODE_OPTIONS=--max-old-space-size=1024
+      - HOME=${HOME}
+      - CLAUDE_HOME=${HOME}/.claude
+      - CLAUDE_DB_PATH=/data/conversations.db
+
+    # Security hardening
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+      - /home/appuser/.npm:size=64m
+
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+
+volumes:
+  chat-explorer-db:
