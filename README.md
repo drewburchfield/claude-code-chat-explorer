@@ -6,6 +6,9 @@ Browse, search, and explore your Claude Code conversation history. A fast, self-
 
 ![Claude Code Chat Explorer](assets/screenshot.png)
 
+> [!WARNING]
+> **Claude Code deletes conversations older than 30 days by default.** Before using this tool, [increase your retention period](#conversation-history-retention-important) or you may have already lost history.
+
 ## Why This Exists
 
 Claude Code stores all your conversations locally in `~/.claude/projects/` as JSONL files, but there's no built-in way to browse or search them. This tool gives you:
@@ -80,6 +83,31 @@ claude-code-chat-explorer/
 ```
 
 ## Configuration
+
+### Conversation History Retention (Important!)
+
+Claude Code **deletes conversations older than 30 days by default**. If you want to preserve your history for this tool to browse, you need to increase the retention period.
+
+Edit `~/.claude/settings.json` and add or modify the `cleanupPeriodDays` setting:
+
+```json
+{
+  "cleanupPeriodDays": 99999
+}
+```
+
+| Value | Behavior |
+|-------|----------|
+| `99999` | Effectively infinite (recommended) |
+| `365` | Keep conversations for 1 year |
+| `30` | Default - deletes sessions inactive for 30+ days |
+
+**Note:** Cleanup happens when you start a new Claude Code session, not continuously. If you've already lost history, it cannot be recovered.
+
+If the file doesn't exist, create it:
+```bash
+echo '{"cleanupPeriodDays": 99999}' > ~/.claude/settings.json
+```
 
 ### Environment Variables
 
