@@ -37,5 +37,16 @@ services:
         reservations:
           memory: 256M
 
+  # chat-explorer-test:
+  #   build:
+  #     context: .
+  #     target: test
+  #   profiles:
+  #     - test
+  #   environment:
+  #     - NODE_ENV=test
+  #   # Tests should not depend on your real ~/.claude data or the prod DB volume
+  #   volumes: []
+
 volumes:
   chat-explorer-db:

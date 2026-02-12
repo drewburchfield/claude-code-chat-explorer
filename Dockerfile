@@ -16,6 +16,27 @@ RUN npm install --omit=dev
 # Copy source code
 COPY src/ ./src/
 
+## Stage 1b: Test runner (includes devDependencies)
+## Commented out to keep the runtime image/compose focused; can be re-enabled as needed.
+## FROM node:20-alpine AS test
+##
+## # Install build dependencies for better-sqlite3 (native module)
+## RUN apk add --no-cache python3 make g++
+##
+## WORKDIR /app
+##
+## # Install full dependency graph for tests (includes devDependencies like vitest)
+## COPY package*.json ./
+## RUN npm ci
+##
+## # Copy source + tests
+## COPY src/ ./src/
+## COPY test/ ./test/
+## COPY vitest.config.js ./
+##
+## # Default to running unit + integration tests
+## CMD ["npm", "test"]
+
 # Stage 2: Production runtime (minimal Alpine)
 FROM node:20-alpine
 
