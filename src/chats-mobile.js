@@ -243,6 +243,39 @@ class ChatsMobile {
       }
     });
 
+    // Lightweight runtime metrics for operations and quality-gate monitoring
+    this.app.get('/api/system/metrics', (req, res) => {
+      try {
+        const memory = process.memoryUsage();
+        res.json({
+          timestamp: new Date().toISOString(),
+          process: {
+            pid: process.pid,
+            uptimeSeconds: Math.round(process.uptime()),
+            memoryBytes: {
+              rss: memory.rss,
+              heapTotal: memory.heapTotal,
+              heapUsed: memory.heapUsed,
+              external: memory.external
+            }
+          },
+          data: {
+            conversationsLoaded: this.data.conversations.length,
+            lastUpdate: this.data.lastUpdate
+          },
+          fileWatcher: this.fileWatcher.getStatus(),
+          fileWatcherMetrics: this.fileWatcher.getMetrics(),
+          database: {
+            enabled: this.useDatabaseBackend,
+            initialized: !!(this.databaseBackend && this.databaseBackend.isInitialized)
+          }
+        });
+      } catch (error) {
+        console.error('Error serving system metrics:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+
     // API to get unique working directories from conversations
     this.app.get('/api/directories', (req, res) => {
       try {

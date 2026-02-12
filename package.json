@@ -7,6 +7,8 @@
   "main": "src/chats-mobile.js",
   "scripts": {
     "start": "node -e \"require('./src/chats-mobile.js').startChatsMobile()\"",
+    "quality:gate": "bash scripts/quality-gate-local.sh",
+    "monitor:runtime": "bash scripts/monitor-runtime.sh",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

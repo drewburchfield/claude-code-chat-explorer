@@ -14,6 +14,26 @@ class FileWatcher {
     this.fileActivity = new Map();
     this.typingTimeout = new Map();
     this.conversationChangeTimers = new Map();
+    this.metrics = {
+      startedAt: null,
+      lastEventAt: null,
+      lastRefreshAt: null,
+      conversationChangeEvents: 0,
+      conversationDebounceResets: 0,
+      conversationCallbacksExecuted: 0,
+      conversationCallbackErrors: 0,
+      dataRefreshAttempts: 0,
+      dataRefreshErrors: 0,
+      refreshTriggers: {
+        conversationAdd: 0,
+        projectAddDir: 0,
+        periodic: 0,
+        manual: 0,
+        unknown: 0
+      },
+      watcherErrors: 0,
+      lastWatcherError: null
+    };
   }
 
   /**
@@ -31,6 +51,7 @@ class FileWatcher {
     this.processRefreshCallback = processRefreshCallback;
     this.dataCache = dataCache;
     this.conversationChangeCallback = conversationChangeCallback;
+    this.metrics.startedAt = new Date().toISOString();
 
     this.setupConversationWatcher();
     this.setupProjectWatcher();
@@ -48,6 +69,7 @@ class FileWatcher {
     ], {
       persistent: true,
       ignoreInitial: true,
+      ignored: (watchPath) => this.shouldIgnoreWatchPath(watchPath),
       awaitWriteFinish: {
         stabilityThreshold: 500,
         pollInterval: 100
@@ -55,6 +77,8 @@ class FileWatcher {
     });
 
     conversationWatcher.on('change', async (filePath) => {
+      this.metrics.lastEventAt = new Date().toISOString();
+      this.metrics.conversationChangeEvents += 1;
       const conversationId = this.extractConversationId(filePath);
 
       if (this.dataCache && filePath) {
@@ -67,7 +91,11 @@ class FileWatcher {
     });
 
     conversationWatcher.on('add', async () => {
-      await this.triggerDataRefresh();
+      await this.triggerDataRefresh('conversationAdd');
+    });
+
+    conversationWatcher.on('error', (error) => {
+      this.recordWatcherError(error, 'conversationWatcher');
     });
 
     this.watchers.push(conversationWatcher);
@@ -81,11 +109,15 @@ class FileWatcher {
       persistent: true,
       ignoreInitial: true,
       depth: 2,
-      ignored: /\.jsonl$/
+      ignored: (watchPath) => this.shouldIgnoreWatchPath(watchPath) || /\.jsonl$/.test(watchPath)
     });
 
     projectWatcher.on('addDir', async () => {
-      await this.triggerDataRefresh();
+      await this.triggerDataRefresh('projectAddDir');
+    });
+
+    projectWatcher.on('error', (error) => {
+      this.recordWatcherError(error, 'projectWatcher');
     });
 
     this.watchers.push(projectWatcher);
@@ -97,7 +129,7 @@ class FileWatcher {
   setupPeriodicRefresh() {
     // Periodic refresh to catch any missed changes (reduced frequency)
     const dataRefreshInterval = setInterval(async () => {
-      await this.triggerDataRefresh();
+      await this.triggerDataRefresh('periodic');
     }, 120000); // Every 2 minutes (reduced from 30 seconds)
 
     this.intervals.push(dataRefreshInterval);
@@ -151,13 +183,16 @@ class FileWatcher {
     const existing = this.conversationChangeTimers.get(conversationId);
     if (existing) {
       clearTimeout(existing);
+      this.metrics.conversationDebounceResets += 1;
     }
 
     const timer = setTimeout(async () => {
       this.conversationChangeTimers.delete(conversationId);
       try {
         await this.conversationChangeCallback(conversationId, filePath);
+        this.metrics.conversationCallbacksExecuted += 1;
       } catch (error) {
+        this.metrics.conversationCallbackErrors += 1;
         console.error(chalk.red(`Error in conversation change callback for ${conversationId}:`), error.message);
       }
     }, 1000);
@@ -174,16 +209,58 @@ class FileWatcher {
   }
 
   /**
-   * Trigger data refresh with error handling
+   * Trigger data refresh with source tagging for observability
+   * @param {string} source - Source of refresh trigger
    */
-  async triggerDataRefresh() {
+  async triggerDataRefresh(source = 'unknown') {
+    if (Object.prototype.hasOwnProperty.call(this.metrics.refreshTriggers, source)) {
+      this.metrics.refreshTriggers[source] += 1;
+    } else {
+      this.metrics.refreshTriggers.unknown += 1;
+    }
+
+    this.metrics.dataRefreshAttempts += 1;
+    this.metrics.lastRefreshAt = new Date().toISOString();
+
     try {
       if (this.dataRefreshCallback) {
         await this.dataRefreshCallback();
       }
     } catch (error) {
+      this.metrics.dataRefreshErrors += 1;
       console.error(chalk.red('Error during data refresh:'), error.message);
     }
+  }
+
+  /**
+   * Record watcher errors without crashing the process
+   * @param {Error} error - Error object
+   * @param {string} source - Error source
+   */
+  recordWatcherError(error, source = 'watcher') {
+    this.metrics.watcherErrors += 1;
+    this.metrics.lastWatcherError = {
+      source,
+      message: error?.message || String(error),
+      code: error?.code || null,
+      path: error?.path || null,
+      timestamp: new Date().toISOString()
+    };
+    console.warn(chalk.yellow(`⚠️  File watcher error [${source}]:`), this.metrics.lastWatcherError.message);
+  }
+
+  /**
+   * Ignore known problematic non-conversation paths under ~/.claude
+   * @param {string} watchPath - Path chokidar is evaluating
+   * @returns {boolean} True if path should be ignored
+   */
+  shouldIgnoreWatchPath(watchPath) {
+    if (!watchPath) return false;
+    const normalizedPath = String(watchPath).replace(/\\/g, '/');
+
+    // .claude/debug/latest can be an invalid symlink target in some setups.
+    // Ignore the debug tree because it does not contain conversation sources.
+    return normalizedPath.includes('/.claude/debug/') || normalizedPath.endsWith('/.claude/debug');
   }
 
   /**
@@ -238,7 +315,9 @@ class FileWatcher {
       this.setupFileWatchers(
         this.claudeDir, 
         this.dataRefreshCallback, 
-        this.processRefreshCallback
+        this.processRefreshCallback,
+        this.dataCache,
+        this.conversationChangeCallback
       );
     }
   }
@@ -340,10 +419,25 @@ class FileWatcher {
    * Force immediate refresh
    */
   async forceRefresh() {
-    await this.triggerDataRefresh();
+    await this.triggerDataRefresh('manual');
     if (this.processRefreshCallback) {
       await this.processRefreshCallback();
     }
+  }
+
+  /**
+   * Get runtime watcher metrics
+   * @returns {Object} Metrics snapshot
+   */
+  getMetrics() {
+    return {
+      ...this.metrics,
+      activeDebounceTimers: this.conversationChangeTimers.size,
+      activeTypingTimers: this.typingTimeout.size,
+      watcherCount: this.watchers.length,
+      intervalCount: this.intervals.length,
+      isActive: this.isActive
+    };
   }
 }
 

@@ -144,6 +144,21 @@ docker compose down -v
 docker compose up -d --build
 ```
 
+## Observability And Quality Gate
+
+```bash
+# Runtime metrics (watcher counters, refresh sources, process memory)
+curl http://127.0.0.1:9876/api/system/metrics
+
+# Reproducible CPU/load quality gate against local Docker deployment
+npm run quality:gate
+
+# Long-running health monitor (default 10 minutes)
+npm run monitor:runtime
+```
+
+Both scripts write artifacts to `/tmp/...` and return non-zero exit codes on threshold failures.
+
 ## Security
 
 The container runs hardened:
