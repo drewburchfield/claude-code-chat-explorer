@@ -11,8 +11,9 @@ class FileWatcher {
     this.watchers = [];
     this.intervals = [];
     this.isActive = false;
-    this.fileActivity = new Map(); // Track file activity for typing detection
-    this.typingTimeout = new Map(); // Track typing timeouts
+    this.fileActivity = new Map();
+    this.typingTimeout = new Map();
+    this.conversationChangeTimers = new Map();
   }
 
   /**
@@ -47,27 +48,22 @@ class FileWatcher {
     ], {
       persistent: true,
       ignoreInitial: true,
+      awaitWriteFinish: {
+        stabilityThreshold: 500,
+        pollInterval: 100
+      }
     });
 
     conversationWatcher.on('change', async (filePath) => {
-      
-      // Extract conversation ID from file path
       const conversationId = this.extractConversationId(filePath);
-      
-      // Enhanced file activity detection for typing
-      await this.handleFileActivity(conversationId, filePath);
-      
-      // Invalidate cache for the changed file
+
       if (this.dataCache && filePath) {
         this.dataCache.invalidateFile(filePath);
       }
-      
-      // Notify specific conversation change if callback exists
+
       if (this.conversationChangeCallback && conversationId) {
-        await this.conversationChangeCallback(conversationId, filePath);
+        this.debouncedConversationChange(conversationId, filePath);
       }
-      
-      await this.triggerDataRefresh();
     });
 
     conversationWatcher.on('add', async () => {
@@ -84,14 +80,11 @@ class FileWatcher {
     const projectWatcher = chokidar.watch(this.claudeDir, {
       persistent: true,
       ignoreInitial: true,
-      depth: 2, // Increased depth to catch subdirectories
+      depth: 2,
+      ignored: /\.jsonl$/
     });
 
     projectWatcher.on('addDir', async () => {
-      await this.triggerDataRefresh();
-    });
-
-    projectWatcher.on('change', async () => {
       await this.triggerDataRefresh();
     });
 
@@ -150,96 +143,26 @@ class FileWatcher {
   }
 
   /**
-   * Handle file activity for typing detection
+   * Debounce conversation change callbacks per conversation ID
    * @param {string} conversationId - Conversation ID
    * @param {string} filePath - File path that changed
    */
-  async handleFileActivity(conversationId, filePath) {
-    if (!conversationId) return;
-
-    const fs = require('fs');
-    try {
-      // Get file stats
-      const stats = fs.statSync(filePath);
-      const now = Date.now();
-      const fileSize = stats.size;
-      const mtime = stats.mtime.getTime();
-
-      // Get previous activity
-      const previousActivity = this.fileActivity.get(conversationId) || {
-        lastSize: 0,
-        lastMtime: 0,
-        lastMessageCheck: 0
-      };
-
-      // Check if this is just a file touch/modification without significant content change
-      const sizeChanged = fileSize !== previousActivity.lastSize;
-      const timeChanged = mtime !== previousActivity.lastMtime;
-      const timeSinceLastCheck = now - previousActivity.lastMessageCheck;
-
-      // Update activity tracking
-      this.fileActivity.set(conversationId, {
-        lastSize: fileSize,
-        lastMtime: mtime,
-        lastMessageCheck: now
-      });
-
-      // If file changed but we haven't checked for complete messages recently
-      if ((sizeChanged || timeChanged) && timeSinceLastCheck > 1000) {
-        // Clear any existing typing timeout
-        const existingTimeout = this.typingTimeout.get(conversationId);
-        if (existingTimeout) {
-          clearTimeout(existingTimeout);
-        }
-
-        // Set a timeout to detect if this is typing activity
-        const typingTimeout = setTimeout(async () => {
-          // After delay, check if a complete message was added
-          await this.checkForTypingActivity(conversationId, filePath);
-        }, 2000); // Wait 2 seconds to see if a complete message appears
-
-        this.typingTimeout.set(conversationId, typingTimeout);
-      }
-    } catch (error) {
-      console.error(chalk.red(`Error handling file activity for ${conversationId}:`), error);
+  debouncedConversationChange(conversationId, filePath) {
+    const existing = this.conversationChangeTimers.get(conversationId);
+    if (existing) {
+      clearTimeout(existing);
     }
-  }
 
-  /**
-   * Check if file activity indicates user typing
-   * @param {string} conversationId - Conversation ID
-   * @param {string} filePath - File path to check
-   */
-  async checkForTypingActivity(conversationId, filePath) {
-    try {
-      // Parse the conversation to see if new complete messages were added
-      const ConversationAnalyzer = require('./ConversationAnalyzer');
-      const analyzer = new ConversationAnalyzer();
-      const messages = await analyzer.getParsedConversation(filePath);
-
-      if (messages && messages.length > 0) {
-        const lastMessage = messages[messages.length - 1];
-        const lastMessageTime = new Date(lastMessage.timestamp).getTime();
-        const now = Date.now();
-        const messageAge = now - lastMessageTime;
-
-        // If the last message is very recent (< 5 seconds), it's probably a new complete message
-        // If it's older, the file activity might indicate typing
-        if (messageAge > 5000 && lastMessage.role === 'assistant') {
-          // File activity after assistant message suggests user is typing
-          
-          // Send typing notification if we have access to notification manager
-          if (this.notificationManager) {
-            this.notificationManager.notifyConversationStateChange(conversationId, 'User typing...', {
-              detectionMethod: 'file_activity',
-              timestamp: new Date().toISOString()
-            });
-          }
-        }
+    const timer = setTimeout(async () => {
+      this.conversationChangeTimers.delete(conversationId);
+      try {
+        await this.conversationChangeCallback(conversationId, filePath);
+      } catch (error) {
+        console.error(chalk.red(`Error in conversation change callback for ${conversationId}:`), error.message);
       }
-    } catch (error) {
-      console.error(chalk.red(`Error checking typing activity for ${conversationId}:`), error);
-    }
+    }, 1000);
+
+    this.conversationChangeTimers.set(conversationId, timer);
   }
 
   /**
@@ -326,7 +249,6 @@ class FileWatcher {
   stop() {
     console.log(chalk.red('🛑 Stopping file watchers...'));
 
-    // Close all watchers
     this.watchers.forEach(watcher => {
       try {
         watcher.close();
@@ -335,12 +257,20 @@ class FileWatcher {
       }
     });
 
-    // Clear all intervals
     this.intervals.forEach(intervalId => {
       clearInterval(intervalId);
     });
 
-    // Reset arrays
+    for (const timer of this.conversationChangeTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.conversationChangeTimers.clear();
+
+    for (const timer of this.typingTimeout.values()) {
+      clearTimeout(timer);
+    }
+    this.typingTimeout.clear();
+
     this.watchers = [];
     this.intervals = [];
     this.isActive = false;
