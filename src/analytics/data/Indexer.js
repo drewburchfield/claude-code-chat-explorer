@@ -246,7 +246,7 @@ class Indexer {
               const text = this._extractTextContent(item.message.content);
               if (text && text.trim()) {
                 const cleaned = text.replace(/[\r\n]+/g, ' ').trim();
-                result.firstMessages.push(cleaned.slice(0, 500));
+                result.firstMessages.push(cleaned);
                 // Use first message as immediate fallback summary
                 if (!result.summary) {
                   result.summary = cleaned.length > 80 ? cleaned.slice(0, 80).trimEnd() + '…' : cleaned;

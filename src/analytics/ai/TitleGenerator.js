@@ -63,11 +63,11 @@ class TitleGenerator {
     if (!messages || messages.length === 0) return null;
 
     const context = messages
-      .map((m, i) => `Message ${i + 1}: ${m.slice(0, 300)}`)
+      .map((m, i) => `Message ${i + 1}: ${m}`)
       .join('\n');
 
     const prompt =
-      `You are a conversation title generator. Given the first messages of a coding assistant conversation, output ONLY a concise 5-word title. No punctuation at the end. No quotes. Just 5 words.\n\n${context}\n\n5-word title:`;
+      `You are a conversation title generator. Given the first messages of a coding assistant conversation, output ONLY a concise 10-word title. No punctuation at the end. No quotes. Just 10 words.\n\n${context}\n\n10-word title:`;
 
     try {
       const controller = new AbortController();
@@ -80,7 +80,7 @@ class TitleGenerator {
           model: this.model,
           prompt,
           stream: false,
-          options: { temperature: 0.3, num_predict: 20 }
+          options: { temperature: 0.3, num_predict: 30 }
         }),
         signal: controller.signal
       });
@@ -97,9 +97,9 @@ class TitleGenerator {
         .replace(/[.!?]+$/, '')
         .trim();
 
-      // Enforce 5-word cap
+      // Enforce 10-word cap
       const words = cleaned.split(/\s+/).filter(Boolean);
-      return words.slice(0, 5).join(' ') || null;
+      return words.slice(0, 10).join(' ') || null;
     } catch (_) {
       return null;
     }
