@@ -168,7 +168,8 @@ class Indexer {
       filename,
       project,
       cwd: parseResult.cwd,  // Store original cwd for project name resolution
-      summary: parseResult.summary,  // First user message text as session title
+      summary: parseResult.summary,  // First user message text as session title (fallback)
+      firstMessages: parseResult.firstMessages,  // First 3 user messages for AI title generation
       messageCount: parseResult.messageCount,
       fileSize: fileStats.size,
       lastModified: fileStats.mtime,
@@ -197,7 +198,8 @@ class Indexer {
         toolUsage: { total: 0, tools: {} },
         searchableContent: '',
         cwd: null,  // Extract working directory for project name
-        summary: null  // First user message text used as session title
+        summary: null,  // First user message text used as session title (fallback)
+        firstMessages: []  // First 3 user messages for AI title generation
       };
 
       const contentParts = [];
@@ -239,13 +241,16 @@ class Indexer {
           if (item.message && (item.type === 'assistant' || item.type === 'user')) {
             result.messageCount++;
 
-            // Capture first user message text as session summary/title
-            if (!result.summary && item.type === 'user') {
+            // Capture first 3 user messages for AI title generation
+            if (item.type === 'user' && result.firstMessages.length < 3) {
               const text = this._extractTextContent(item.message.content);
               if (text && text.trim()) {
-                // Truncate to 80 chars, strip newlines
                 const cleaned = text.replace(/[\r\n]+/g, ' ').trim();
-                result.summary = cleaned.length > 80 ? cleaned.slice(0, 80).trimEnd() + '…' : cleaned;
+                result.firstMessages.push(cleaned.slice(0, 500));
+                // Use first message as immediate fallback summary
+                if (!result.summary) {
+                  result.summary = cleaned.length > 80 ? cleaned.slice(0, 80).trimEnd() + '…' : cleaned;
+                }
               }
             }
 

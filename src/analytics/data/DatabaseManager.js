@@ -65,7 +65,8 @@ class DatabaseManager {
           tokens_output INTEGER DEFAULT 0,
           primary_model TEXT,
           indexed_at INTEGER NOT NULL,
-          summary TEXT
+          summary TEXT,
+          first_messages TEXT
         )
       `);
 
@@ -125,6 +126,12 @@ class DatabaseManager {
 
     // Migration: Add summary column for session title display
     this._migrateSummaryColumn();
+
+    // Migration: Add first_messages column for AI title generation
+    this._migrateFirstMessagesColumn();
+
+    // Migration: Add ai_titled flag to track which convos have AI-generated titles
+    this._migrateAiTitledColumn();
   }
 
   /**
@@ -141,6 +148,39 @@ class DatabaseManager {
       }
     } catch (err) {
       console.warn(chalk.yellow(`⚠️ Summary column migration failed: ${err.message}`));
+    }
+  }
+
+  /**
+   * Migrate database to add ai_titled flag
+   * @private
+   */
+  _migrateAiTitledColumn() {
+    try {
+      const columns = this.db.prepare("PRAGMA table_info(conversations)").all();
+      const columnNames = columns.map(c => c.name);
+      if (!columnNames.includes('ai_titled')) {
+        this.db.exec(`ALTER TABLE conversations ADD COLUMN ai_titled INTEGER DEFAULT 0`);
+      }
+    } catch (err) {
+      console.warn(chalk.yellow(`⚠️ ai_titled column migration failed: ${err.message}`));
+    }
+  }
+
+  /**
+   * Migrate database to add first_messages column for AI title generation
+   * @private
+   */
+  _migrateFirstMessagesColumn() {
+    try {
+      const columns = this.db.prepare("PRAGMA table_info(conversations)").all();
+      const columnNames = columns.map(c => c.name);
+
+      if (!columnNames.includes('first_messages')) {
+        this.db.exec(`ALTER TABLE conversations ADD COLUMN first_messages TEXT`);
+      }
+    } catch (err) {
+      console.warn(chalk.yellow(`⚠️ first_messages column migration failed: ${err.message}`));
     }
   }
 
@@ -289,8 +329,8 @@ class DatabaseManager {
       INSERT OR REPLACE INTO conversations (
         id, file_path, filename, project, message_count, file_size,
         last_modified, created, tokens_total, tokens_input, tokens_output,
-        primary_model, indexed_at, is_subagent, parent_id, cwd, summary
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        primary_model, indexed_at, is_subagent, parent_id, cwd, summary, first_messages
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const deleteOldFts = this.db.prepare(`
@@ -335,7 +375,8 @@ class DatabaseManager {
         conversation.isSubagent ? 1 : 0,
         conversation.parentId || null,
         conversation.cwd || null,
-        conversation.summary || null
+        conversation.summary || null,
+        conversation.firstMessages ? JSON.stringify(conversation.firstMessages) : null
       );
 
       // Update FTS index
@@ -687,8 +728,52 @@ class DatabaseManager {
       indexedAt: new Date(row.indexed_at),
       isSubagent: row.is_subagent === 1,
       parentId: row.parent_id || null,
-      summary: row.summary || null
+      summary: row.summary || null,
+      firstMessages: row.first_messages ? JSON.parse(row.first_messages) : []
     };
+  }
+
+  /**
+   * Update the summary (AI-generated title) for a conversation
+   * @param {string} id - Conversation ID
+   * @param {string} summary - Generated title
+   */
+  updateSummary(id, summary) {
+    this.db.prepare('UPDATE conversations SET summary = ? WHERE id = ?').run(summary, id);
+  }
+
+  /**
+   * Get conversations that have first_messages but no AI-generated summary yet.
+   * The fallback summary (first 80 chars) is always set during indexing, so we
+   * detect "needs AI title" by checking if first_messages has content and
+   * the summary looks like a truncated raw message (ends with …) or is very long.
+   * Simpler: store a flag. Instead we just return all convos with first_messages.
+   * @returns {Array} Conversations needing title generation
+   */
+  getConversationsNeedingTitles() {
+    const rows = this.db.prepare(`
+      SELECT id, first_messages, summary
+      FROM conversations
+      WHERE first_messages IS NOT NULL
+        AND first_messages != '[]'
+        AND (ai_titled IS NULL OR ai_titled = 0)
+    `).all();
+    return rows.map(r => ({
+      id: r.id,
+      firstMessages: r.first_messages ? JSON.parse(r.first_messages) : [],
+      summary: r.summary
+    }));
+  }
+
+  /**
+   * Mark a conversation as having an AI-generated title
+   * @param {string} id - Conversation ID
+   */
+  markAiTitled(id) {
+    // ai_titled column added via migration
+    try {
+      this.db.prepare('UPDATE conversations SET ai_titled = 1 WHERE id = ?').run(id);
+    } catch (_) {}
   }
 
   /**

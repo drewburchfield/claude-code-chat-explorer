@@ -2918,6 +2918,13 @@
                     }
                 });
 
+                // Listen for AI title updates broadcast from background title generator
+                this.webSocketService.on('message', (data) => {
+                    if (data.type === 'title_update' && data.conversationId && data.title) {
+                        this.handleTitleUpdate(data.conversationId, data.title);
+                    }
+                });
+
                 // Try to connect WebSocket
                 try {
                     console.log('🌐 Attempting WebSocket connection...');
@@ -5026,6 +5033,35 @@
              * @param {Object} message - New message object
              * @param {Object} metadata - Additional metadata
              */
+            /**
+             * Handle live AI title update pushed from background TitleGenerator.
+             * Updates the in-memory conversation object and refreshes the DOM label
+             * without triggering a full re-render.
+             */
+            handleTitleUpdate(conversationId, title) {
+                // Update in-memory conversation
+                const conv = this.conversations.find(c => c.id === conversationId);
+                if (conv) conv.summary = title;
+                const allConv = (this.allConversations || []).find(c => c.id === conversationId);
+                if (allConv) allConv.summary = title;
+
+                // Update the DOM label directly (no full re-render needed)
+                const item = document.querySelector(`.conversation-item[data-conversation-id="${conversationId}"]`);
+                if (item) {
+                    const nameEl = item.querySelector('.conversation-name');
+                    if (nameEl) {
+                        nameEl.textContent = title;
+                        nameEl.title = title;
+                    }
+                }
+
+                // If this is the currently open conversation, update the chat view title too
+                if (this.selectedConversationId === conversationId) {
+                    const chatViewTitle = document.getElementById('chatViewTitle');
+                    if (chatViewTitle) chatViewTitle.textContent = title;
+                }
+            }
+
             handleNewMessage(conversationId, message, metadata) {
                 console.log('🔄 Processing new message', {
                     conversationId,

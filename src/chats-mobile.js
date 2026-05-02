@@ -1357,6 +1357,29 @@ async function startChatsMobile(options = {}) {
     
     console.log(chalk.green('✅ Claude Code Chats Mobile is running!'));
 
+    // Kick off AI title generation in the background (non-blocking)
+    if (chatsMobile.databaseBackend && chatsMobile.databaseBackend.isInitialized) {
+      setImmediate(async () => {
+        try {
+          await chatsMobile.databaseBackend.generateTitlesInBackground(
+            (convId, title) => {
+              // Push live update to all connected browser tabs
+              if (chatsMobile.webSocketServer) {
+                chatsMobile.webSocketServer.broadcast({
+                  type: 'title_update',
+                  conversationId: convId,
+                  title
+                });
+              }
+            }
+          );
+        } catch (err) {
+          // Non-fatal — existing fallback summaries remain
+          console.warn(chalk.yellow('⚠️  Background title generation error:'), err.message);
+        }
+      });
+    }
+
     // Show active theme
     if (chatsMobile.theme === 'dark') {
       console.log(chalk.magenta('🎨 Theme: dark  (use without --dark for light mode)'));
