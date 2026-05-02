@@ -7,7 +7,7 @@ class Sidebar {
     this.container = container;
     this.onNavigate = onNavigate;
     this.currentPage = 'dashboard';
-    this.isCollapsed = true; // Start collapsed for minimal design
+    this.isCollapsed = false;
     this.hoverTimeout = null;
     
     this.init();
@@ -26,15 +26,22 @@ class Sidebar {
    */
   render() {
     this.container.innerHTML = `
-      <nav class="sidebar ${this.isCollapsed ? 'collapsed' : ''}">
+      <nav class="sidebar hover-expanded">
         <div class="sidebar-header">
           <div class="logo">
             <div class="logo-icon">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M3 3h18v18H3V3zm16 16V5H5v14h14zM7 7h10v2H7V7zm0 4h10v2H7v-2zm0 4h7v2H7v-2z"/>
+              <svg width="26" height="26" viewBox="0 0 100 100" fill="currentColor">
+                <ellipse cx="50" cy="22" rx="9" ry="22"/>
+                <ellipse cx="50" cy="22" rx="9" ry="22" transform="rotate(45 50 50)"/>
+                <ellipse cx="50" cy="22" rx="9" ry="22" transform="rotate(90 50 50)"/>
+                <ellipse cx="50" cy="22" rx="9" ry="22" transform="rotate(135 50 50)"/>
+                <ellipse cx="50" cy="22" rx="9" ry="22" transform="rotate(180 50 50)"/>
+                <ellipse cx="50" cy="22" rx="9" ry="22" transform="rotate(225 50 50)"/>
+                <ellipse cx="50" cy="22" rx="9" ry="22" transform="rotate(270 50 50)"/>
+                <ellipse cx="50" cy="22" rx="9" ry="22" transform="rotate(315 50 50)"/>
               </svg>
             </div>
-            <span class="logo-text">Claude Analytics</span>
+            <span class="logo-text">Claude Code</span>
           </div>
         </div>
         
@@ -81,18 +88,6 @@ class Sidebar {
       });
     });
 
-    // Hover to expand when collapsed
-    sidebar.addEventListener('mouseenter', () => {
-      if (this.isCollapsed) {
-        this.expandOnHover();
-      }
-    });
-
-    sidebar.addEventListener('mouseleave', () => {
-      if (this.isCollapsed) {
-        this.collapseOnLeave();
-      }
-    });
   }
 
   /**

@@ -3,6 +3,7 @@ const path = require('path');
 const os = require('os');
 const DatabaseManager = require('./DatabaseManager');
 const Indexer = require('./Indexer');
+const TitleGenerator = require('../ai/TitleGenerator');
 
 /**
  * DatabaseBackend - Integration layer between SQLite database and ChatsMobile
@@ -251,8 +252,25 @@ class DatabaseBackend {
       },
       // Subagent hierarchy fields
       isSubagent: conv.isSubagent || false,
-      parentId: conv.parentId || null
+      parentId: conv.parentId || null,
+      // Session title derived from first user message
+      summary: conv.summary || null
     };
+  }
+
+  /**
+   * Generate AI titles for all conversations in the background.
+   * Calls onTitleReady(id, title) each time a title is generated so the
+   * caller can push a live WebSocket update.
+   *
+   * @param {Function} onTitleReady - Callback invoked with (conversationId, title)
+   * @param {Object} options - Options forwarded to TitleGenerator
+   * @returns {Promise<Object>} Generation stats
+   */
+  async generateTitlesInBackground(onTitleReady, options = {}) {
+    if (!this.db) throw new Error('Database not initialized');
+    const generator = new TitleGenerator(this.db, options);
+    return generator.generateAll(onTitleReady);
   }
 
   /**

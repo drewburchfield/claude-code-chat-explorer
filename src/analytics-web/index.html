@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Claude Code Analytics - Terminal</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+    <script src="components/chart.min.js"></script>
     
     <!-- Service Scripts (loaded first as dependencies) -->
     <script src="services/WebSocketService.js"></script>
@@ -26,21 +26,21 @@
     <!-- main.js removed - deprecated architecture -->
     <style>
         :root {
-            /* Dark theme colors (default) */
-            --bg-primary: #0d1117;
-            --bg-secondary: #161b22;
-            --bg-tertiary: #21262d;
-            --border-primary: #30363d;
-            --border-secondary: #21262d;
-            --text-primary: #c9d1d9;
-            --text-secondary: #7d8590;
-            --text-accent: #d57455;
-            --text-success: #3fb950;
-            --text-warning: #f97316;
-            --text-error: #f85149;
-            --text-info: #a5d6ff;
-            --shadow-primary: rgba(0, 0, 0, 0.4);
-            --shadow-secondary: rgba(1, 4, 9, 0.85);
+            /* Claude Code dark theme */
+            --bg-primary: #0f0f0f;
+            --bg-secondary: #1a1a1a;
+            --bg-tertiary: #242424;
+            --border-primary: #2e2e2e;
+            --border-secondary: #202020;
+            --text-primary: #ececec;
+            --text-secondary: #8b8b8b;
+            --text-accent: #d97757;
+            --text-success: #4caf73;
+            --text-warning: #f0a050;
+            --text-error: #e05a4e;
+            --text-info: #7db0d4;
+            --shadow-primary: rgba(0, 0, 0, 0.6);
+            --shadow-secondary: rgba(0, 0, 0, 0.9);
         }
         
         [data-theme="light"] {
@@ -2773,19 +2773,17 @@
         }
         
         .app-sidebar {
-            width: 60px;
-            min-width: 60px;
+            width: 220px;
+            min-width: 220px;
             background: transparent;
             border: none;
-            transition: width 0.3s ease;
         }
-        
+
         .app-main {
             flex: 1;
             display: flex;
             flex-direction: column;
-            margin-left: 56px;
-            transition: margin-left 0.3s ease;
+            margin-left: 220px;
         }
         
         .app-content {
@@ -2858,28 +2856,25 @@
             display: none;
         }
         
-        /* Minimalist Console Sidebar */
+        /* Claude Code Sidebar */
         .sidebar {
-            width: 56px;
+            width: 220px;
             height: 100vh;
-            background: var(--bg-primary);
+            background: var(--bg-secondary);
             border-right: 1px solid var(--border-primary);
             display: flex;
             flex-direction: column;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             position: fixed;
             top: 0;
             left: 0;
             z-index: 1000;
-            box-shadow: 2px 0 8px rgba(0, 0, 0, 0.1);
-            overflow: visible;
+            overflow: hidden;
         }
-        
+
         .sidebar.hover-expanded {
             width: 220px;
             background: var(--bg-secondary);
-            border-right: 1px solid var(--text-accent);
-            box-shadow: 4px 0 16px rgba(213, 116, 85, 0.1);
+            border-right: 1px solid var(--border-primary);
             position: fixed;
             top: 0;
             left: 0;
