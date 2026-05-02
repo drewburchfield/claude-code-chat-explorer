@@ -17,7 +17,7 @@ class TitleGenerator {
   constructor(databaseManager, options = {}) {
     this.db = databaseManager;
     this.ollamaUrl = options.ollamaUrl || 'http://localhost:11434';
-    this.model = options.model || 'llama3.2:1b';
+    this.model = options.model || 'gemma3:1b';
     this.concurrency = options.concurrency || 3; // parallel requests
     this.timeoutMs = options.timeoutMs || 15000;  // 15s per title
     this.isAvailable = null; // null = unchecked
@@ -45,7 +45,7 @@ class TitleGenerator {
       if (!this.isAvailable) {
         console.log(chalk.yellow(`⚠️  TitleGenerator: model "${this.model}" not found in Ollama.`));
         console.log(chalk.gray(`   Available: ${models.join(', ') || 'none'}`));
-        console.log(chalk.gray(`   Run: ollama pull ${this.model}`));
+        console.log(chalk.gray(`   Run: ollama pull ${this.model}  (or: ollama pull gemma3:1b / llama3.2:1b)`));
       }
       return this.isAvailable;
     } catch (_) {
