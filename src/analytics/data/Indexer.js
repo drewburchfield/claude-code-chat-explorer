@@ -168,6 +168,7 @@ class Indexer {
       filename,
       project,
       cwd: parseResult.cwd,  // Store original cwd for project name resolution
+      summary: parseResult.summary,  // First user message text as session title
       messageCount: parseResult.messageCount,
       fileSize: fileStats.size,
       lastModified: fileStats.mtime,
@@ -195,7 +196,8 @@ class Indexer {
         modelInfo: { primaryModel: null, models: {} },
         toolUsage: { total: 0, tools: {} },
         searchableContent: '',
-        cwd: null  // Extract working directory for project name
+        cwd: null,  // Extract working directory for project name
+        summary: null  // First user message text used as session title
       };
 
       const contentParts = [];
@@ -236,6 +238,16 @@ class Indexer {
           // Only count user/assistant messages
           if (item.message && (item.type === 'assistant' || item.type === 'user')) {
             result.messageCount++;
+
+            // Capture first user message text as session summary/title
+            if (!result.summary && item.type === 'user') {
+              const text = this._extractTextContent(item.message.content);
+              if (text && text.trim()) {
+                // Truncate to 80 chars, strip newlines
+                const cleaned = text.replace(/[\r\n]+/g, ' ').trim();
+                result.summary = cleaned.length > 80 ? cleaned.slice(0, 80).trimEnd() + '…' : cleaned;
+              }
+            }
 
             // Extract searchable content
             const content = this._extractTextContent(item.message.content);

@@ -3082,7 +3082,7 @@
                                 </div>
                                 <div class="conversation-content">
                                     <div class="conversation-header">
-                                        <div class="conversation-name">Session ${conversationId}</div>
+                                        <div class="conversation-name" title="${conv.summary || 'Session ' + conversationId}">${conv.summary ? this.escapeHtml(conv.summary) : 'Session ' + conversationId}</div>
                                         ${subagentBadge}${subagentCount}
                                         <div class="conversation-time">${lastActivity}</div>
                                     </div>
@@ -3173,8 +3173,8 @@
                 // Handle "agent-" prefix IDs to avoid displaying "-" as first character
                 const baseConvId = conversation.id.startsWith('agent-') ? conversation.id.slice(6) : conversation.id;
                 const convId = baseConvId.slice(-8);
-                chatViewTitle.textContent = projectName;
-                chatViewSubtitle.textContent = `Session ${convId}`;
+                chatViewTitle.textContent = conversation.summary || `Session ${convId}`;
+                chatViewSubtitle.textContent = projectName;
                 
                 // Show chat view with animation
                 chatView.classList.add('active');

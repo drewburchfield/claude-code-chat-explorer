@@ -251,7 +251,9 @@ class DatabaseBackend {
       },
       // Subagent hierarchy fields
       isSubagent: conv.isSubagent || false,
-      parentId: conv.parentId || null
+      parentId: conv.parentId || null,
+      // Session title derived from first user message
+      summary: conv.summary || null
     };
   }
 

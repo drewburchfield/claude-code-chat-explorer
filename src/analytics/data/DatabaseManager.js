@@ -64,7 +64,8 @@ class DatabaseManager {
           tokens_input INTEGER DEFAULT 0,
           tokens_output INTEGER DEFAULT 0,
           primary_model TEXT,
-          indexed_at INTEGER NOT NULL
+          indexed_at INTEGER NOT NULL,
+          summary TEXT
         )
       `);
 
@@ -121,6 +122,26 @@ class DatabaseManager {
 
     // Migration: Add cwd column for project name resolution
     this._migrateCwdColumn();
+
+    // Migration: Add summary column for session title display
+    this._migrateSummaryColumn();
+  }
+
+  /**
+   * Migrate database to add summary column for session title display
+   * @private
+   */
+  _migrateSummaryColumn() {
+    try {
+      const columns = this.db.prepare("PRAGMA table_info(conversations)").all();
+      const columnNames = columns.map(c => c.name);
+
+      if (!columnNames.includes('summary')) {
+        this.db.exec(`ALTER TABLE conversations ADD COLUMN summary TEXT`);
+      }
+    } catch (err) {
+      console.warn(chalk.yellow(`⚠️ Summary column migration failed: ${err.message}`));
+    }
   }
 
   /**
@@ -268,8 +289,8 @@ class DatabaseManager {
       INSERT OR REPLACE INTO conversations (
         id, file_path, filename, project, message_count, file_size,
         last_modified, created, tokens_total, tokens_input, tokens_output,
-        primary_model, indexed_at, is_subagent, parent_id, cwd
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        primary_model, indexed_at, is_subagent, parent_id, cwd, summary
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const deleteOldFts = this.db.prepare(`
@@ -313,7 +334,8 @@ class DatabaseManager {
         now,
         conversation.isSubagent ? 1 : 0,
         conversation.parentId || null,
-        conversation.cwd || null
+        conversation.cwd || null,
+        conversation.summary || null
       );
 
       // Update FTS index
@@ -371,7 +393,7 @@ class DatabaseManager {
       SELECT
         id, file_path, filename, project, message_count, file_size,
         last_modified, created, tokens_total, tokens_input, tokens_output,
-        primary_model, indexed_at, is_subagent, parent_id
+        primary_model, indexed_at, is_subagent, parent_id, summary
       FROM conversations
     `;
 
@@ -425,7 +447,7 @@ class DatabaseManager {
         SELECT
           c.id, c.file_path, c.filename, c.project, c.message_count, c.file_size,
           c.last_modified, c.created, c.tokens_total, c.tokens_input, c.tokens_output,
-          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id,
+          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id, c.summary,
           bm25(conversation_fts) as relevance
         FROM conversation_fts fts
         JOIN conversations c ON fts.conversation_id = c.id
@@ -474,7 +496,7 @@ class DatabaseManager {
         SELECT
           c.id, c.file_path, c.filename, c.project, c.message_count, c.file_size,
           c.last_modified, c.created, c.tokens_total, c.tokens_input, c.tokens_output,
-          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id,
+          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id, c.summary,
           bm25(conversation_fts) as relevance,
           snippet(conversation_fts, 1, '{{MATCH}}', '{{/MATCH}}', '...', 20) as snippet
         FROM conversation_fts fts
@@ -664,7 +686,8 @@ class DatabaseManager {
       },
       indexedAt: new Date(row.indexed_at),
       isSubagent: row.is_subagent === 1,
-      parentId: row.parent_id || null
+      parentId: row.parent_id || null,
+      summary: row.summary || null
     };
   }
 
