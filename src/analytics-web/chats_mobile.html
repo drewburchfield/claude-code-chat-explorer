@@ -12,7 +12,42 @@
         }
 
         :root {
-            /* Dark theme - slate and teal */
+            /* Claude Code - light / white + orange theme (default) */
+            --bg-primary: #ffffff;
+            --bg-secondary: #f9f7f5;
+            --bg-tertiary: #f0ebe4;
+            --text-primary: #1a1a1a;
+            --text-secondary: #6b6560;
+            --text-accent: #d97757;
+            --text-success: #2d8a4e;
+            --text-warning: #c17d2e;
+            --text-error: #c0392b;
+            --border-primary: #ddd8cf;
+            --border-secondary: #ccc5ba;
+            --shadow: rgba(0, 0, 0, 0.08);
+
+            /* Accent colors */
+            --accent-primary: #d97757;
+            --accent-primary-hover: #c4633e;
+            --accent-dark: #1a1a1a;
+            --accent-gray: #f0ece6;
+            --accent-rgb: 217, 119, 87;
+
+            /* Today highlight */
+            --today-color: var(--text-accent);
+            --today-bg-rgb: 217, 119, 87;
+
+            /* Progress bar */
+            --progress-start: #e08050;
+            --progress-end: #d97757;
+
+            /* Message bubble colors */
+            --message-received: #d97757;
+            --message-sent: #c4633e;
+        }
+
+        [data-theme="dark"] {
+            /* Original dark / slate + teal theme */
             --bg-primary: #0f1419;
             --bg-secondary: #1a1f26;
             --bg-tertiary: #242c36;
@@ -31,10 +66,19 @@
             --accent-primary-hover: #5eead4;
             --accent-dark: #0f1419;
             --accent-gray: #242c36;
+            --accent-rgb: 45, 212, 191;
+
+            /* Today highlight */
+            --today-color: #3b82f6;
+            --today-bg-rgb: 59, 130, 246;
+
+            /* Progress bar */
+            --progress-start: #10b981;
+            --progress-end: #059669;
 
             /* Message bubble colors */
-            --message-received: #0d9488; /* Teal for received messages */
-            --message-sent: #059669; /* Emerald green for sent messages */
+            --message-received: #0d9488;
+            --message-sent: #059669;
         }
 
         body {
@@ -65,7 +109,7 @@
 
         /* Chat sidebar header */
         .chat-header {
-            background: var(--bg-secondary);
+            background: #ffffff;
             padding: 16px 20px;
             border-bottom: 1px solid var(--border-primary);
             display: flex;
@@ -114,8 +158,8 @@
         }
 
         .header-btn {
-            background: rgba(45, 212, 191, 0.08);
-            border: 1px solid rgba(45, 212, 191, 0.2);
+            background: rgba(var(--accent-rgb), 0.08);
+            border: 1px solid rgba(var(--accent-rgb), 0.2);
             color: var(--accent-primary);
             font-size: 0.8rem;
             font-weight: 500;
@@ -128,18 +172,18 @@
         }
 
         .header-btn:hover {
-            background: rgba(45, 212, 191, 0.15);
-            border-color: rgba(45, 212, 191, 0.35);
+            background: rgba(var(--accent-rgb), 0.15);
+            border-color: rgba(var(--accent-rgb), 0.35);
             color: var(--accent-primary-hover);
         }
 
         .header-btn:active {
-            background: rgba(45, 212, 191, 0.2);
+            background: rgba(var(--accent-rgb), 0.2);
         }
 
         .back-btn {
-            background: rgba(45, 212, 191, 0.1) !important;
-            border: 1px solid rgba(45, 212, 191, 0.25) !important;
+            background: rgba(var(--accent-rgb), 0.1) !important;
+            border: 1px solid rgba(var(--accent-rgb), 0.25) !important;
             color: var(--accent-primary) !important;
             font-size: 1.1rem !important;
             font-weight: 600 !important;
@@ -150,8 +194,8 @@
         }
 
         .back-btn:hover {
-            background: rgba(45, 212, 191, 0.18) !important;
-            border-color: rgba(45, 212, 191, 0.35) !important;
+            background: rgba(var(--accent-rgb), 0.18) !important;
+            border-color: rgba(var(--accent-rgb), 0.35) !important;
         }
 
         /* Search bar */
@@ -297,7 +341,7 @@
         .search-filter-input:focus {
             border-color: var(--accent-primary);
             background: var(--bg-primary);
-            box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.1);
+            box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.1);
         }
 
         .search-filter-input::placeholder {
@@ -346,13 +390,13 @@
 
         .search-btn-primary {
             background: var(--accent-primary);
-            color: #0f1419;
+            color: #ffffff;
         }
 
         .search-btn-primary:hover {
             background: var(--accent-primary-hover);
             transform: translateY(-1px);
-            box-shadow: 0 6px 16px rgba(45, 212, 191, 0.3);
+            box-shadow: 0 6px 16px rgba(var(--accent-rgb), 0.3);
         }
 
         .search-btn-secondary {
@@ -390,7 +434,7 @@
         }
 
         .advanced-search-toggle:hover {
-            background: rgba(45, 212, 191, 0.15);
+            background: rgba(var(--accent-rgb), 0.15);
             color: var(--accent-primary-hover);
             border-color: var(--accent-primary);
         }
@@ -412,7 +456,7 @@
         }
 
         .settings-toggle:hover {
-            background: rgba(45, 212, 191, 0.1);
+            background: rgba(var(--accent-rgb), 0.1);
             border-color: var(--accent-primary);
             color: var(--accent-primary);
         }
@@ -450,7 +494,7 @@
         .search-result-item.subagent {
             padding-left: 36px;
             position: relative;
-            background: #0a0d10;
+            background: var(--bg-tertiary);
         }
 
         .search-result-item.subagent::before {
@@ -496,7 +540,7 @@
         .conversation-item.subagent {
             padding-left: 36px;
             position: relative;
-            background: #0a0d10;
+            background: var(--bg-tertiary);
         }
 
         .conversation-item.subagent::before {
@@ -942,12 +986,12 @@
         }
 
         .action-btn.download-btn:hover {
-            background: rgba(59, 130, 246, 0.15);
-            color: rgba(59, 130, 246, 1);
+            background: rgba(var(--accent-rgb), 0.15);
+            color: rgba(var(--accent-rgb), 1);
         }
 
         .action-btn.download-btn:hover svg {
-            stroke: rgba(59, 130, 246, 1);
+            stroke: rgba(var(--accent-rgb), 1);
         }
 
         .action-btn.search-btn:hover {
@@ -1130,19 +1174,19 @@
         }
 
         .project-sessions {
-            color: var(--text-secondary);
+            color: var(--text-accent);
             font-weight: 500;
         }
 
         /* Today's activity highlight */
         .project-header.today-activity {
-            background: linear-gradient(90deg, rgba(59, 130, 246, 0.08) 0%, transparent 100%);
-            border-left: 3px solid #3b82f6;
+            background: linear-gradient(90deg, rgba(var(--accent-rgb), 0.08) 0%, transparent 100%);
+            border-left: 3px solid var(--today-color);
             padding-left: 17px; /* Compensate for border */
         }
 
         .project-header.today-activity .project-date {
-            color: #3b82f6;
+            color: var(--today-color);
             font-weight: 500;
         }
 
@@ -1155,8 +1199,8 @@
             font-size: 0.65rem;
             font-weight: 600;
             letter-spacing: 0.05em;
-            color: #3b82f6;
-            background: rgba(59, 130, 246, 0.12);
+            color: var(--today-color);
+            background: rgba(var(--accent-rgb), 0.12);
             padding: 2px 6px;
             border-radius: 4px;
         }
@@ -1222,7 +1266,7 @@
         /* Active states - Blue/Cyan (Recent activity, ready) */
         .state-active { 
             background: rgba(23, 162, 184, 0.15); 
-            color: #17a2b8; 
+            color: var(--text-accent); 
             border: 1px solid rgba(23, 162, 184, 0.3);
         }
 
@@ -1263,7 +1307,7 @@
         /* Special states */
         .state-recent { 
             background: rgba(0, 123, 255, 0.15); 
-            color: #007bff; 
+            color: var(--text-accent); 
             border: 1px solid rgba(0, 123, 255, 0.3);
         }
 
@@ -1286,9 +1330,9 @@
         }
 
         .message-count {
-            background: rgba(45, 212, 191, 0.15);
+            background: rgba(var(--accent-rgb), 0.15);
             color: var(--accent-primary);
-            border: 1px solid rgba(45, 212, 191, 0.25);
+            border: 1px solid rgba(var(--accent-rgb), 0.25);
             border-radius: 10px;
             font-size: 0.7rem;
             font-weight: 600;
@@ -1430,14 +1474,14 @@
             font-size: 0.9rem;
             margin-top: 8px;
             padding: 4px 0;
-            border-top: 1px solid rgba(45, 212, 191, 0.25);
+            border-top: 1px solid rgba(var(--accent-rgb), 0.25);
             text-align: center;
             transition: all 0.2s ease;
         }
 
         .message-expand-link:hover {
             color: var(--accent-primary-hover);
-            background: rgba(45, 212, 191, 0.1);
+            background: rgba(var(--accent-rgb), 0.1);
         }
 
         .message-collapse-link {
@@ -1480,7 +1524,7 @@
         }
 
         .tool-summary:hover {
-            background: rgba(45, 212, 191, 0.1);
+            background: rgba(var(--accent-rgb), 0.1);
             padding: 2px 4px;
             border-radius: 4px;
         }
@@ -1610,16 +1654,16 @@
             font-size: 0.8rem;
             margin-top: 8px;
             padding: 6px 12px;
-            border-top: 1px solid rgba(45, 212, 191, 0.25);
+            border-top: 1px solid rgba(var(--accent-rgb), 0.25);
             text-align: center;
             transition: all 0.2s ease;
-            background: rgba(45, 212, 191, 0.05);
+            background: rgba(var(--accent-rgb), 0.05);
             border-radius: 0 0 4px 4px;
         }
 
         .tool-result-expand-link:hover {
             color: var(--accent-primary-hover);
-            background: rgba(45, 212, 191, 0.1);
+            background: rgba(var(--accent-rgb), 0.1);
         }
 
         .tool-result-collapse-link {
@@ -1909,7 +1953,7 @@
 
         .status-dot.working {
             background: var(--accent-primary);
-            box-shadow: 0 0 6px rgba(45, 212, 191, 0.3);
+            box-shadow: 0 0 6px rgba(var(--accent-rgb), 0.3);
             animation: pulse 2s infinite;
         }
 
@@ -2049,8 +2093,8 @@
         }
 
         .modal-btn {
-            background: rgba(45, 212, 191, 0.1);
-            border: 1px solid rgba(45, 212, 191, 0.15);
+            background: rgba(var(--accent-rgb), 0.1);
+            border: 1px solid rgba(var(--accent-rgb), 0.15);
             color: var(--accent-primary);
             font-size: 0.85rem;
             font-weight: 600;
@@ -2063,15 +2107,15 @@
         }
 
         .modal-btn:hover {
-            background: rgba(45, 212, 191, 0.12);
-            border-color: rgba(45, 212, 191, 0.25);
+            background: rgba(var(--accent-rgb), 0.12);
+            border-color: rgba(var(--accent-rgb), 0.25);
             transform: translateY(-1px);
-            box-shadow: 0 2px 4px rgba(45, 212, 191, 0.15);
+            box-shadow: 0 2px 4px rgba(var(--accent-rgb), 0.15);
         }
 
         .modal-btn:active {
             transform: translateY(0);
-            box-shadow: 0 1px 2px rgba(45, 212, 191, 0.15);
+            box-shadow: 0 1px 2px rgba(var(--accent-rgb), 0.15);
         }
 
         .modal-btn.primary {
@@ -2120,7 +2164,7 @@
             <div class="chat-search">
                 <div style="display: flex; align-items: center; gap: 8px;">
                     <div style="flex: 1; position: relative;">
-                        <span style="position: absolute; left: 16px; top: 50%; transform: translateY(-50%); color: var(--text-secondary); pointer-events: none;">🔍</span>
+                        <span style="position: absolute; left: 16px; top: 50%; transform: translateY(-50%); color: var(--text-secondary); pointer-events: none; display:flex; align-items:center;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
                         <input
                             type="text"
                             class="search-input"
@@ -2139,7 +2183,7 @@
                         <span>Include subagents</span>
                     </label>
                     <button class="settings-toggle" id="settingsToggle" aria-label="Search filters" title="Filters">
-                        ⚙️
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                     </button>
                 </div>
 
@@ -2404,7 +2448,7 @@
     <!-- Download Context Modal -->
     <div class="modal-overlay" id="downloadModal">
         <div class="modal">
-            <div class="modal-header" style="background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);">
+            <div class="modal-header" style="background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-primary-hover) 100%);">
                 <span class="modal-icon">📥</span>
                 <h3 class="modal-title">Download Conversation Context</h3>
             </div>
@@ -2413,26 +2457,26 @@
                     Download this conversation as a <strong>Markdown context file</strong> that Claude Code can read to continue your work.
                 </p>
 
-                <div style="background: rgba(59, 130, 246, 0.08); border-left: 3px solid #3b82f6; padding: 12px; border-radius: 6px; margin-bottom: 16px;">
-                    <h4 style="color: #3b82f6; margin: 0 0 8px 0; font-size: 14px;">📋 What's included</h4>
+                <div style="background: rgba(var(--accent-rgb), 0.08); border-left: 3px solid var(--accent-primary); padding: 12px; border-radius: 6px; margin-bottom: 16px;">
+                    <h4 style="color: var(--text-accent); margin: 0 0 8px 0; font-size: 14px;">📋 What's included</h4>
                     <p style="margin: 0; font-size: 13px; color: var(--text-secondary); line-height: 1.4;">
                         Full conversation history (last <strong>100 messages</strong>) formatted for Claude Code to understand
                     </p>
                 </div>
 
-                <div style="background: rgba(16, 185, 129, 0.08); border-left: 3px solid #10b981; padding: 12px; border-radius: 6px; margin-bottom: 16px;">
-                    <h4 style="color: #10b981; margin: 0 0 8px 0; font-size: 14px;">💡 How to continue the conversation</h4>
+                <div style="background: rgba(var(--accent-rgb), 0.08); border-left: 3px solid var(--accent-primary); padding: 12px; border-radius: 6px; margin-bottom: 16px;">
+                    <h4 style="color: var(--text-accent); margin: 0 0 8px 0; font-size: 14px;">💡 How to continue the conversation</h4>
                     <p style="margin: 0 0 12px 0; font-size: 13px; color: var(--text-secondary); line-height: 1.4;">
                         After downloading, use one of these commands to load the context:
                     </p>
 
                     <div style="margin-bottom: 10px;">
-                        <p style="margin: 0 0 4px 0; font-size: 12px; font-weight: 600; color: #10b981;">Option 1: Start with context loaded</p>
+                        <p style="margin: 0 0 4px 0; font-size: 12px; font-weight: 600; color: var(--text-accent);">Option 1: Start with context loaded</p>
                         <code style="display: block; background: rgba(0,0,0,0.5); padding: 8px; border-radius: 4px; font-size: 12px; color: #e5e7eb; overflow-x: auto; white-space: nowrap;">claude "read @context-file.md and continue"</code>
                     </div>
 
                     <div>
-                        <p style="margin: 0 0 4px 0; font-size: 12px; font-weight: 600; color: #10b981;">Option 2: In interactive mode</p>
+                        <p style="margin: 0 0 4px 0; font-size: 12px; font-weight: 600; color: var(--text-accent);">Option 2: In interactive mode</p>
                         <code style="display: block; background: rgba(0,0,0,0.5); padding: 8px; border-radius: 4px; font-size: 12px; color: #e5e7eb; overflow-x: auto; white-space: nowrap;">claude</code>
                         <code style="display: block; background: rgba(0,0,0,0.5); padding: 8px; border-radius: 4px; font-size: 12px; color: #e5e7eb; overflow-x: auto; white-space: nowrap; margin-top: 4px;">> @context-file.md continue with the task</code>
                     </div>
@@ -2447,7 +2491,7 @@
 
             <div class="modal-actions">
                 <button class="modal-btn secondary" onclick="closeDownloadModal()">Cancel</button>
-                <button class="modal-btn primary" onclick="proceedWithDownload()" style="background: #3b82f6;">
+                <button class="modal-btn primary" onclick="proceedWithDownload()" style="background: var(--accent-primary);">
                     Download Context File
                 </button>
             </div>
@@ -2474,13 +2518,13 @@
                             <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Total Messages</div>
                             <div style="font-size: 24px; font-weight: 700; color: #8b5cf6;" id="analyticsMessageCount">-</div>
                         </div>
-                        <div style="background: rgba(59, 130, 246, 0.1); border-radius: 8px; padding: 12px; border-left: 3px solid #3b82f6;">
+                        <div style="background: rgba(var(--accent-rgb), 0.1); border-radius: 8px; padding: 12px; border-left: 3px solid var(--accent-primary);">
                             <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Total Tokens</div>
-                            <div style="font-size: 24px; font-weight: 700; color: #3b82f6;" id="analyticsTotalTokens">-</div>
+                            <div style="font-size: 24px; font-weight: 700; color: var(--text-accent);" id="analyticsTotalTokens">-</div>
                         </div>
-                        <div style="background: rgba(16, 185, 129, 0.1); border-radius: 8px; padding: 12px; border-left: 3px solid #10b981;">
+                        <div style="background: rgba(var(--accent-rgb), 0.1); border-radius: 8px; padding: 12px; border-left: 3px solid var(--accent-primary);">
                             <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Tool Calls</div>
-                            <div style="font-size: 24px; font-weight: 700; color: #10b981;" id="analyticsToolCalls">-</div>
+                            <div style="font-size: 24px; font-weight: 700; color: var(--text-accent);" id="analyticsToolCalls">-</div>
                         </div>
                         <div style="background: rgba(234, 88, 12, 0.1); border-radius: 8px; padding: 12px; border-left: 3px solid #ea580c;">
                             <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Tools Used</div>
@@ -2504,7 +2548,7 @@
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
                             <div>
                                 <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">Input Tokens</div>
-                                <div style="font-size: 18px; font-weight: 600; color: #3b82f6;" id="analyticsInputTokens">-</div>
+                                <div style="font-size: 18px; font-weight: 600; color: var(--text-accent);" id="analyticsInputTokens">-</div>
                             </div>
                             <div>
                                 <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">Output Tokens</div>
@@ -2516,12 +2560,12 @@
                             </div>
                             <div>
                                 <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">Cache Reads</div>
-                                <div style="font-size: 18px; font-weight: 600; color: #10b981;" id="analyticsCacheReads">-</div>
+                                <div style="font-size: 18px; font-weight: 600; color: var(--text-accent);" id="analyticsCacheReads">-</div>
                             </div>
                         </div>
                         <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.1);">
                             <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Cost Estimate (USD)</div>
-                            <div style="font-size: 16px; font-weight: 600; color: #10b981;" id="analyticsCostEstimate">$0.00</div>
+                            <div style="font-size: 16px; font-weight: 600; color: var(--text-accent);" id="analyticsCostEstimate">$0.00</div>
                         </div>
                     </div>
 
@@ -2558,18 +2602,18 @@
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
                             <div>
                                 <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">Claude Executing</div>
-                                <div style="font-size: 18px; font-weight: 600; color: #3b82f6;" id="analyticsWaitTime">-</div>
+                                <div style="font-size: 18px; font-weight: 600; color: var(--text-accent);" id="analyticsWaitTime">-</div>
                                 <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;" id="analyticsWaitPercent">-</div>
                             </div>
                             <div>
                                 <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">User Conversing</div>
-                                <div style="font-size: 18px; font-weight: 600; color: #10b981;" id="analyticsUserTime">-</div>
+                                <div style="font-size: 18px; font-weight: 600; color: var(--text-accent);" id="analyticsUserTime">-</div>
                                 <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;" id="analyticsUserPercent">-</div>
                             </div>
                         </div>
                         <div style="height: 8px; background: rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden; display: flex;">
-                            <div id="analyticsWaitBar" style="background: linear-gradient(90deg, #3b82f6, #2563eb); transition: width 0.3s ease;"></div>
-                            <div id="analyticsUserBar" style="background: linear-gradient(90deg, #10b981, #059669); transition: width 0.3s ease;"></div>
+                            <div id="analyticsWaitBar" style="background: linear-gradient(90deg, var(--progress-start), var(--progress-end)); transition: width 0.3s ease;"></div>
+                            <div id="analyticsUserBar" style="background: linear-gradient(90deg, var(--progress-start), var(--progress-end)); transition: width 0.3s ease;"></div>
                         </div>
                     </div>
 
@@ -2936,6 +2980,22 @@
                 }
             }
 
+            getAvatarGradient(letter) {
+                const palettes = [
+                    ['#d97757', '#c4633e'],
+                    ['#c88c35', '#b07525'],
+                    ['#b85c3a', '#9c4a2e'],
+                    ['#be8c55', '#a07040'],
+                    ['#c17d45', '#a06030'],
+                    ['#d07060', '#b84848'],
+                    ['#a87850', '#8c6038'],
+                    ['#cc8040', '#b06028'],
+                ];
+                const idx = (letter.toUpperCase().charCodeAt(0) - 65 + palettes.length) % palettes.length;
+                const [from, to] = palettes[idx];
+                return `linear-gradient(135deg, ${from} 0%, ${to} 100%)`;
+            }
+
             renderConversations(conversations, states = {}) {
                 const conversationsList = document.getElementById('conversationsList');
 
@@ -3039,7 +3099,7 @@
                     return `
                         <div class="project-group${todayClass}" data-project="${escapedProjectName}">
                             <div class="project-header${todayClass}" data-project="${escapedProjectName}">
-                                <div class="project-avatar">
+                                <div class="project-avatar" style="background: ${this.getAvatarGradient(firstLetter)}">
                                     ${this.escapeHtml(firstLetter)}
                                 </div>
                                 <div class="project-info">
@@ -4643,7 +4703,7 @@
                 // Add a brief highlight animation to make it more visible
                 messageElement.style.transition = 'background-color 0.3s ease';
                 const originalBg = messageElement.style.backgroundColor;
-                messageElement.style.backgroundColor = 'rgba(45, 212, 191, 0.1)';
+                messageElement.style.backgroundColor = 'rgba(var(--accent-rgb), 0.1)';
 
                 setTimeout(() => {
                     messageElement.style.backgroundColor = originalBg;
@@ -5769,7 +5829,7 @@
                                     <span style="font-size: 12px; color: var(--text-secondary);">${count} calls (${percentage}%)</span>
                                 </div>
                                 <div style="height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;">
-                                    <div style="height: 100%; width: ${percentage}%; background: linear-gradient(90deg, #10b981, #059669); transition: width 0.3s ease;"></div>
+                                    <div style="height: 100%; width: ${percentage}%; background: linear-gradient(90deg, var(--progress-start), var(--progress-end)); transition: width 0.3s ease;"></div>
                                 </div>
                             </div>
                         `;
@@ -5864,8 +5924,8 @@
                                     align-items: center;
                                     gap: 4px;
                                     padding: 4px 10px;
-                                    background: rgba(59, 130, 246, 0.15);
-                                    border: 1px solid rgba(59, 130, 246, 0.3);
+                                    background: rgba(var(--accent-rgb), 0.15);
+                                    border: 1px solid rgba(var(--accent-rgb), 0.3);
                                     border-radius: 4px;
                                     font-size: 12px;
                                     font-family: monospace;
@@ -5891,8 +5951,8 @@
                                     align-items: center;
                                     gap: 4px;
                                     padding: 4px 10px;
-                                    background: rgba(16, 185, 129, 0.15);
-                                    border: 1px solid rgba(16, 185, 129, 0.3);
+                                    background: rgba(var(--accent-rgb), 0.15);
+                                    border: 1px solid rgba(var(--accent-rgb), 0.3);
                                     border-radius: 4px;
                                     font-size: 12px;
                                     color: var(--text-primary);
