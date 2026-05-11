@@ -121,4 +121,32 @@ describe('DataCache', () => {
   it('logStats does not throw on a fresh cache', () => {
     expect(() => cache.logStats()).not.toThrow();
   });
+
+  it('invalidateAll preserves per-slot config fields (e.g. processes.ttl)', () => {
+    // The processes slot owns a `ttl` field that does not exist on the
+    // computation slots; a sloppy reset that overwrites the whole object
+    // shape would erase it. We exercise the slot twice to catch any
+    // first-call-only happy path.
+    cache.caches.processes.data = { foo: 1 };
+    cache.caches.processes.timestamp = 999;
+
+    cache.invalidateAll();
+    expect(cache.caches.processes.data).toBeNull();
+    expect(cache.caches.processes.timestamp).toBe(0);
+    expect(cache.caches.processes.ttl).toBe(500);
+    expect(cache.caches.processes).not.toHaveProperty('dependencies');
+
+    cache.invalidateAll();
+    expect(cache.caches.processes.ttl).toBe(500);
+  });
+
+  it('invalidateAll accumulates metrics monotonically across calls', () => {
+    cache.caches.fileContent.set('/a', { content: 'x', mtime: 1 });
+    cache.invalidateAll();
+    cache.caches.fileContent.set('/b', { content: 'x', mtime: 1 });
+    cache.caches.fileContent.set('/c', { content: 'x', mtime: 1 });
+    cache.invalidateAll();
+    expect(cache.metrics.invalidations).toBe(2);
+    expect(cache.metrics.filesInvalidated).toBe(3);
+  });
 });

@@ -928,8 +928,14 @@ class ChatsMobile {
       );
 
       this.log('info', chalk.green('👀 File watching setup successful'));
+      this.fileWatchingFailed = false;
     } catch (error) {
-      this.log('warn', chalk.yellow('⚠️  File watching setup failed:', error.message));
+      // A failed watcher setup means newly written chats never reach the
+      // index, so this is operationally fatal — surface it loudly rather
+      // than warn-and-continue.
+      this.fileWatchingFailed = true;
+      this.log('error', chalk.red(`File watching setup failed: ${error.message}`));
+      if (error.stack) console.error(error.stack);
     }
   }
 
@@ -941,29 +947,59 @@ class ChatsMobile {
    * @param {string} filePath - Absolute path to the changed .jsonl file
    */
   async handleFileChange(filePath) {
-    try {
-      if (this.useDatabaseBackend && this.databaseBackend?.isInitialized) {
-        await this.databaseBackend.indexFile(filePath);
+    // Coalesce concurrent runs against the same file so a burst of chokidar
+    // events doesn't queue redundant indexer work.
+    if (!this._fileIndexInFlight) this._fileIndexInFlight = new Map();
+    const existing = this._fileIndexInFlight.get(filePath);
+    if (existing) return existing;
+
+    const work = (async () => {
+      try {
+        if (this.useDatabaseBackend && this.databaseBackend?.isInitialized) {
+          await this.databaseBackend.indexFile(filePath);
+        }
+      } catch (error) {
+        // Re-throw so the watcher's catch increments dataRefreshErrors and
+        // /api/metrics reflects the failure rather than reporting zero
+        // errors while the DB is silently stale.
+        console.error(
+          chalk.red(`[indexFile] Failed for ${filePath}: ${error?.message || error}`)
+        );
+        if (error?.stack) console.error(error.stack);
+        throw error;
+      } finally {
+        this._fileIndexInFlight.delete(filePath);
       }
-    } catch (error) {
-      console.error('Error indexing changed file:', error?.message || error);
-    }
-    // Defer the data refresh through the existing debounced channel.
-    await this.handleDataRefresh();
+      await this.handleDataRefresh();
+    })();
+    this._fileIndexInFlight.set(filePath, work);
+    return work;
   }
 
   /**
    * Full re-index entry point used by the periodic fallback. Cheap on the
    * incremental path (Indexer skips files whose mtime+size haven't changed).
+   * Coalesced so an overlapping interval can't fan out concurrent runIndex
+   * calls against the same SQLite database.
    */
   async handleFullReindex() {
-    try {
-      if (this.useDatabaseBackend && this.databaseBackend?.isInitialized) {
-        await this.databaseBackend.runIndex();
+    if (this._reindexInFlight) return this._reindexInFlight;
+    this._reindexInFlight = (async () => {
+      try {
+        if (this.useDatabaseBackend && this.databaseBackend?.isInitialized) {
+          await this.databaseBackend.runIndex();
+        }
+      } catch (error) {
+        console.error(
+          chalk.red(`[fullReindex] runIndex failed: ${error?.message || error}`)
+        );
+        if (error?.stack) console.error(error.stack);
+        throw error;
+      } finally {
+        this._reindexInFlight = null;
       }
-    } catch (error) {
-      console.warn('Periodic re-index error:', error?.message || error);
-    }
+    })();
+    return this._reindexInFlight;
   }
 
   /**

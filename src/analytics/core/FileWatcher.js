@@ -136,7 +136,7 @@ class FileWatcher {
           await this.fileChangeCallback(filePath);
         } catch (error) {
           this.metrics.dataRefreshErrors += 1;
-          console.warn(chalk.yellow('⚠️  fileChangeCallback error:'), error?.message || error);
+          console.error(chalk.red('fileChangeCallback error (change):'), error?.stack || error);
         }
       }
 
@@ -151,7 +151,7 @@ class FileWatcher {
           await this.fileChangeCallback(filePath);
         } catch (error) {
           this.metrics.dataRefreshErrors += 1;
-          console.warn(chalk.yellow('⚠️  fileChangeCallback error (add):'), error?.message || error);
+          console.error(chalk.red('fileChangeCallback error (add):'), error?.stack || error);
         }
       }
       await this.triggerDataRefresh('conversationAdd');
@@ -216,14 +216,30 @@ class FileWatcher {
    */
   async runPeriodicFallback() {
     if (this.dataCache && typeof this.dataCache.invalidateAll === 'function') {
-      try { this.dataCache.invalidateAll(); }
-      catch (error) { console.warn(chalk.yellow('⚠️  invalidateAll error:'), error?.message || error); }
+      try {
+        this.dataCache.invalidateAll();
+      } catch (error) {
+        // A half-cleared cache would let the re-index pass run against
+        // stale computed results, which is strictly worse than skipping
+        // this tick. Bail out and record the failure so /api/metrics
+        // shows it.
+        this.metrics.dataRefreshErrors += 1;
+        console.error(
+          chalk.red('invalidateAll failed during periodic fallback:'),
+          error?.stack || error
+        );
+        return;
+      }
     }
     if (this.fullReindexCallback) {
-      try { await this.fullReindexCallback(); }
-      catch (error) {
+      try {
+        await this.fullReindexCallback();
+      } catch (error) {
         this.metrics.dataRefreshErrors += 1;
-        console.warn(chalk.yellow('⚠️  fullReindexCallback error:'), error?.message || error);
+        console.error(
+          chalk.red('fullReindexCallback error:'),
+          error?.stack || error
+        );
       }
     }
     await this.triggerDataRefresh('periodic');

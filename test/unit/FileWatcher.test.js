@@ -176,4 +176,85 @@ describe('FileWatcher.setupFileWatchers callback plumbing', () => {
     expect(dataRefresh).toHaveBeenCalled();
     return fw.stop();
   });
+
+  it('invokes cache-invalidate, fileChange, and conversationChange in that order on change', async () => {
+    // The contract is: drop the per-file cache entry first, then re-index,
+    // then debounce the conversationChange ping. If a refactor reorders
+    // these, the dashboard can briefly serve stale parsed content.
+    const order = [];
+    const dataCache = {
+      invalidateFile: vi.fn(() => { order.push('invalidateFile'); }),
+    };
+    const fileChange = vi.fn(async () => { order.push('fileChange'); });
+    const conversationChange = vi.fn(() => { order.push('conversationChange'); });
+
+    const fw = new FileWatcher();
+    fw.setupFileWatchers(
+      '/tmp/claude',
+      () => {},
+      () => {},
+      dataCache,
+      conversationChange,
+      fileChange
+    );
+
+    // Skip the debouncer so conversationChange fires synchronously enough
+    // for ordering to be observable.
+    fw.debouncedConversationChange = (id, fp) => conversationChange(id, fp);
+
+    const convWatcher = fakeWatchers[0];
+    await convWatcher._emit('change', '/tmp/claude/projects/p/abc.jsonl');
+    expect(order).toEqual(['invalidateFile', 'fileChange', 'conversationChange']);
+    return fw.stop();
+  });
+
+  it('records dataRefreshErrors when fileChangeCallback rejects', async () => {
+    const fileChange = vi.fn().mockRejectedValue(new Error('indexer blew up'));
+    const fw = new FileWatcher();
+    fw.setupFileWatchers('/tmp/claude', () => {}, () => {}, null, null, fileChange);
+    const convWatcher = fakeWatchers[0];
+    await convWatcher._emit('change', '/tmp/claude/projects/p/abc.jsonl');
+    await convWatcher._emit('add', '/tmp/claude/projects/p/new.jsonl');
+    expect(fw.metrics.dataRefreshErrors).toBe(2);
+    return fw.stop();
+  });
+});
+
+describe('FileWatcher.runPeriodicFallback error isolation', () => {
+  it('skips fullReindex when invalidateAll throws, and records the failure', async () => {
+    const fw = new FileWatcher();
+    fw.claudeDir = '/tmp/claude';
+    const fullReindex = vi.fn().mockResolvedValue(undefined);
+    fw.dataCache = { invalidateAll: vi.fn(() => { throw new Error('cache exploded'); }) };
+    fw.fullReindexCallback = fullReindex;
+    fw.dataRefreshCallback = vi.fn().mockResolvedValue(undefined);
+
+    await fw.runPeriodicFallback();
+    expect(fw.dataCache.invalidateAll).toHaveBeenCalled();
+    expect(fullReindex).not.toHaveBeenCalled();
+    expect(fw.metrics.dataRefreshErrors).toBe(1);
+  });
+
+  it('still calls triggerDataRefresh when fullReindexCallback rejects', async () => {
+    const fw = new FileWatcher();
+    fw.claudeDir = '/tmp/claude';
+    fw.dataCache = { invalidateAll: vi.fn() };
+    fw.fullReindexCallback = vi.fn().mockRejectedValue(new Error('runIndex blew up'));
+    fw.dataRefreshCallback = vi.fn().mockResolvedValue(undefined);
+
+    await fw.runPeriodicFallback();
+    expect(fw.fullReindexCallback).toHaveBeenCalled();
+    expect(fw.dataRefreshCallback).toHaveBeenCalled();
+    expect(fw.metrics.dataRefreshErrors).toBe(1);
+  });
+
+  it('tolerates null dataCache and null fullReindexCallback', async () => {
+    const fw = new FileWatcher();
+    fw.claudeDir = '/tmp/claude';
+    fw.dataCache = null;
+    fw.fullReindexCallback = null;
+    fw.dataRefreshCallback = vi.fn().mockResolvedValue(undefined);
+    await expect(fw.runPeriodicFallback()).resolves.not.toThrow();
+    expect(fw.dataRefreshCallback).toHaveBeenCalled();
+  });
 });

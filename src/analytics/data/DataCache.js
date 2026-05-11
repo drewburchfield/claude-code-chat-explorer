@@ -515,44 +515,56 @@ class DataCache {
    */
   invalidateAll() {
     let fileEntriesCleared = 0;
-    Object.values(this.caches).forEach(cache => {
+    for (const [name, cache] of Object.entries(this.caches)) {
       if (cache instanceof Map) {
         fileEntriesCleared += cache.size;
         cache.clear();
       } else {
-        cache.data = null;
-        cache.timestamp = 0;
-        cache.dependencies = new Set();
-        cache.dependencyTimestamps = new Map();
+        this._resetSingletonCache(name, cache);
       }
-    });
+    }
     this.metrics.filesInvalidated += fileEntriesCleared;
     this.metrics.invalidations += 1;
     this.metrics.computationsInvalidated += 2;
   }
 
   /**
+   * Reset a non-Map cache slot in place, preserving any config fields the
+   * slot owns (e.g. `processes.ttl`). Only the data/timestamp/dependency
+   * fields a slot actually declares get touched.
+   * @private
+   */
+  _resetSingletonCache(_name, cache) {
+    cache.data = null;
+    cache.timestamp = 0;
+    if (Object.prototype.hasOwnProperty.call(cache, 'dependencies')) {
+      cache.dependencies = new Set();
+    }
+    if (Object.prototype.hasOwnProperty.call(cache, 'dependencyTimestamps')) {
+      cache.dependencyTimestamps = new Map();
+    }
+  }
+
+  /**
    * Clear all caches
    */
   clearAll() {
-    Object.values(this.caches).forEach(cache => {
+    for (const [name, cache] of Object.entries(this.caches)) {
       if (cache instanceof Map) {
         cache.clear();
       } else {
-        cache.data = null;
-        cache.timestamp = 0;
-        cache.dependencies = new Set();
-        cache.dependencyTimestamps = new Map();
+        this._resetSingletonCache(name, cache);
       }
-    });
-    
+    }
+
     // Reset metrics
     this.metrics = {
       hits: 0,
       misses: 0,
       invalidations: 0,
       filesInvalidated: 0,
-      computationsInvalidated: 0
+      computationsInvalidated: 0,
+      evictions: 0
     };
   }
 
