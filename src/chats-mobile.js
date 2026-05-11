@@ -13,6 +13,14 @@ const AgentAnalyzer = require('./analytics/core/AgentAnalyzer');
 const WebSocketServer = require('./analytics/notifications/WebSocketServer');
 const SessionSharing = require('./session-sharing');
 const DatabaseBackend = require('./analytics/data/DatabaseBackend');
+const BoundedMap = require('./utils/BoundedMap');
+
+// Cap the per-conversation state Maps. With 200 entries we cover the
+// "user has 200 conversations open recently" window; older
+// conversations get re-snapshotted on next access at the cost of one
+// extra DB hit, which is preferable to growing the in-process Map for
+// the lifetime of the watcher.
+const CONVERSATION_STATE_CAP = 200;
 
 class ChatsMobile {
   constructor(options = {}) {
@@ -50,11 +58,14 @@ class ChatsMobile {
       lastUpdate: new Date().toISOString()
     };
     
-    // Track message counts per conversation to detect new messages
-    this.conversationMessageCounts = new Map();
-    
-    // Track message snapshots to detect message updates (e.g., tool correlation)
-    this.conversationMessageSnapshots = new Map();
+    // Track message counts per conversation to detect new messages.
+    // BoundedMap because this otherwise grows once per conversation the
+    // user ever opened in the lifetime of the process.
+    this.conversationMessageCounts = new BoundedMap(CONVERSATION_STATE_CAP);
+
+    // Track message snapshots to detect message updates (e.g., tool
+    // correlation). Bounded for the same reason.
+    this.conversationMessageSnapshots = new BoundedMap(CONVERSATION_STATE_CAP);
   }
 
   /**
