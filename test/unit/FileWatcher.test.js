@@ -248,6 +248,36 @@ describe('FileWatcher.runPeriodicFallback error isolation', () => {
     expect(fw.metrics.dataRefreshErrors).toBe(1);
   });
 
+  it('preserves the fileChange/fullReindex callbacks across stop+resume', () => {
+    // resume() previously called setupFileWatchers with 5 args, which
+    // re-initialised fileChangeCallback and fullReindexCallback to null
+    // and silently broke live re-indexing for the rest of the process
+    // lifetime.
+    const originalWatch = chokidar.watch;
+    const fakes = [];
+    chokidar.watch = () => { const f = makeFakeWatcher(); fakes.push(f); return f; };
+    try {
+      const fw = new FileWatcher();
+      const fileChange = vi.fn();
+      const fullReindex = vi.fn();
+      fw.setupFileWatchers(
+        '/tmp/claude',
+        () => {},
+        () => {},
+        null,
+        null,
+        fileChange,
+        fullReindex
+      );
+      fw.isActive = true;
+      fw.resume();
+      expect(fw.fileChangeCallback).toBe(fileChange);
+      expect(fw.fullReindexCallback).toBe(fullReindex);
+    } finally {
+      chokidar.watch = originalWatch;
+    }
+  });
+
   it('tolerates null dataCache and null fullReindexCallback', async () => {
     const fw = new FileWatcher();
     fw.claudeDir = '/tmp/claude';

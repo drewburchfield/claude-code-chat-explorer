@@ -412,13 +412,17 @@ class FileWatcher {
       // Clear existing watchers
       this.stop();
       
-      // Restart watchers
+      // Restart watchers. Pass through every callback we already have so a
+      // resume after suspend doesn't silently drop the per-file index path
+      // or the periodic full-reindex path.
       this.setupFileWatchers(
-        this.claudeDir, 
-        this.dataRefreshCallback, 
+        this.claudeDir,
+        this.dataRefreshCallback,
         this.processRefreshCallback,
         this.dataCache,
-        this.conversationChangeCallback
+        this.conversationChangeCallback,
+        this.fileChangeCallback,
+        this.fullReindexCallback
       );
     }
   }
