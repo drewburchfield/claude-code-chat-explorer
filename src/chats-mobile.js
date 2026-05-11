@@ -17,7 +17,8 @@ const DatabaseBackend = require('./analytics/data/DatabaseBackend');
 class ChatsMobile {
   constructor(options = {}) {
     this.app = express();
-    this.port = 9876; // Uncommon port for chats mobile
+    // options.port: explicit numeric port, or 0 for an ephemeral port (tests).
+    this.port = options.port !== undefined ? options.port : 9876;
     this.fileWatcher = new FileWatcher();
     this.stateCalculator = new StateCalculator();
     this.dataCache = new DataCache();
@@ -26,10 +27,10 @@ class ChatsMobile {
     this.webSocketServer = null;
     this.options = options;
     this.verbose = options.verbose || false;
-    
+
     // Initialize ConversationAnalyzer with proper parameters
-    const homeDir = os.homedir();
-    const claudeDir = path.join(homeDir, '.claude');
+    // options.claudeDir lets tests point at a temp directory instead of $HOME/.claude.
+    const claudeDir = options.claudeDir || path.join(os.homedir(), '.claude');
     this.claudeDir = claudeDir;
     this.conversationAnalyzer = new ConversationAnalyzer(claudeDir, this.dataCache);
 
@@ -914,21 +915,91 @@ class ChatsMobile {
    */
   async setupFileWatching() {
     try {
-      const homeDir = os.homedir();
-      const claudeDir = path.join(homeDir, '.claude');
-      
+      const claudeDir = this.claudeDir;
+
       this.fileWatcher.setupFileWatchers(
         claudeDir,
         this.handleDataRefresh.bind(this),
         () => {}, // processRefreshCallback (not needed for mobile)
         this.dataCache,
-        this.handleConversationChange.bind(this)
+        this.handleConversationChange.bind(this),
+        this.handleFileChange.bind(this),
+        this.handleFullReindex.bind(this)
       );
-      
+
       this.log('info', chalk.green('👀 File watching setup successful'));
+      this.fileWatchingFailed = false;
     } catch (error) {
-      this.log('warn', chalk.yellow('⚠️  File watching setup failed:', error.message));
+      // A failed watcher setup means newly written chats never reach the
+      // index, so this is operationally fatal — surface it loudly rather
+      // than warn-and-continue.
+      this.fileWatchingFailed = true;
+      this.log('error', chalk.red(`File watching setup failed: ${error.message}`));
+      if (error.stack) console.error(error.stack);
     }
+  }
+
+  /**
+   * Persist a single file's contents to the database, then refresh the
+   * in-memory view. This is the only path on the watcher side that mutates
+   * the persistent store; the periodic fallback uses handleFullReindex.
+   *
+   * @param {string} filePath - Absolute path to the changed .jsonl file
+   */
+  async handleFileChange(filePath) {
+    // Coalesce concurrent runs against the same file so a burst of chokidar
+    // events doesn't queue redundant indexer work.
+    if (!this._fileIndexInFlight) this._fileIndexInFlight = new Map();
+    const existing = this._fileIndexInFlight.get(filePath);
+    if (existing) return existing;
+
+    const work = (async () => {
+      try {
+        if (this.useDatabaseBackend && this.databaseBackend?.isInitialized) {
+          await this.databaseBackend.indexFile(filePath);
+        }
+      } catch (error) {
+        // Re-throw so the watcher's catch increments dataRefreshErrors and
+        // /api/metrics reflects the failure rather than reporting zero
+        // errors while the DB is silently stale.
+        console.error(
+          chalk.red(`[indexFile] Failed for ${filePath}: ${error?.message || error}`)
+        );
+        if (error?.stack) console.error(error.stack);
+        throw error;
+      } finally {
+        this._fileIndexInFlight.delete(filePath);
+      }
+      await this.handleDataRefresh();
+    })();
+    this._fileIndexInFlight.set(filePath, work);
+    return work;
+  }
+
+  /**
+   * Full re-index entry point used by the periodic fallback. Cheap on the
+   * incremental path (Indexer skips files whose mtime+size haven't changed).
+   * Coalesced so an overlapping interval can't fan out concurrent runIndex
+   * calls against the same SQLite database.
+   */
+  async handleFullReindex() {
+    if (this._reindexInFlight) return this._reindexInFlight;
+    this._reindexInFlight = (async () => {
+      try {
+        if (this.useDatabaseBackend && this.databaseBackend?.isInitialized) {
+          await this.databaseBackend.runIndex();
+        }
+      } catch (error) {
+        console.error(
+          chalk.red(`[fullReindex] runIndex failed: ${error?.message || error}`)
+        );
+        if (error?.stack) console.error(error.stack);
+        throw error;
+      } finally {
+        this._reindexInFlight = null;
+      }
+    })();
+    return this._reindexInFlight;
   }
 
   /**
@@ -938,7 +1009,7 @@ class ChatsMobile {
     if (this.refreshTimeout) {
       clearTimeout(this.refreshTimeout);
     }
-    
+
     this.refreshTimeout = setTimeout(async () => {
       try {
         await this.loadInitialData();
@@ -1250,6 +1321,11 @@ class ChatsMobile {
   async startServer() {
     return new Promise(async (resolve) => {
       this.httpServer = this.app.listen(this.port, async () => {
+        // If port was 0 (ephemeral, used by tests), record the actual port the OS assigned.
+        const address = this.httpServer.address();
+        if (address && typeof address === 'object') {
+          this.port = address.port;
+        }
         this.localUrl = `http://localhost:${this.port}`;
         console.log(chalk.green(`📱 Chats Mobile server started at ${this.localUrl}`));
         

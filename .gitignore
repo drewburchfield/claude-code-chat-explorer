@@ -41,3 +41,6 @@ temp/
 
 # Playwright MCP artifacts
 .playwright-mcp/
+
+# Internal planning artifacts (superpowers skill)
+/docs/superpowers/

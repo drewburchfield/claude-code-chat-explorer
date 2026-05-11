@@ -17,19 +17,25 @@ export default defineConfig({
       reporter: ['text', 'json', 'html', 'lcov'],
       reportsDirectory: './coverage',
       include: [
-        // Only measure coverage for files we're actively testing
+        // Files we actively test. FileWatcher and DataCache are in scope
+        // because the wiring this codebase owns around chokidar and the
+        // per-file cache is exactly where long-running stability lives;
+        // "chokidar is well-tested" doesn't cover our integration with it.
+        // session-sharing.js has unit coverage only for the URL validator
+        // path that this PR rewrote; the rest is intentionally out of
+        // scope until a dedicated tests pass is added.
         'src/analytics/data/DatabaseManager.js',
         'src/analytics/data/Indexer.js',
         'src/analytics/core/ConversationAnalyzer.js',
+        'src/analytics/core/FileWatcher.js',
+        'src/analytics/data/DataCache.js',
       ],
       exclude: [
         'src/analytics-web/**',
         'test/**',
         'node_modules/**',
         // Files we chose not to test (per YAGNI):
-        // - FileWatcher: chokidar is well-tested
         // - ProcessDetector: platform-specific
-        // - DataCache: complex state management
         // - DatabaseBackend: thin wrapper layer
         // - AgentAnalyzer: low priority
         // - SessionAnalyzer: low priority

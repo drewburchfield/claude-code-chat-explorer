@@ -2,10 +2,21 @@ const chalk = require('chalk');
 const fs = require('fs-extra');
 const path = require('path');
 const os = require('os');
-const { exec } = require('child_process');
-const { promisify } = require('util');
-const execAsync = promisify(exec);
 const QRCode = require('qrcode');
+
+// Hosts permitted as session-clone sources. Anything else is rejected before
+// we touch the network. Keeping this list short and explicit prevents the
+// import path from being used to pull arbitrary content into ~/.claude.
+const ALLOWED_CLONE_HOSTS = new Set([
+  'x0.at',
+  'transfer.sh',
+  'file.io',
+  '0x0.st',
+]);
+
+const DOWNLOAD_TIMEOUT_MS = 15000;
+const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024; // 50 MiB
+const MAX_CLONE_REDIRECTS = 4;
 
 /**
  * SessionSharing - Handles exporting Claude Code sessions as downloadable context
@@ -207,56 +218,6 @@ class SessionSharing {
   }
 
   /**
-   * Upload session to x0.at
-   * @param {Object} sessionData - Session export data
-   * @param {string} conversationId - Conversation ID for filename
-   * @returns {Promise<string>} Upload URL
-   */
-  async uploadToX0(sessionData, conversationId) {
-    const tmpDir = path.join(os.tmpdir(), 'claude-code-sessions');
-    await fs.ensureDir(tmpDir);
-
-    const tmpFile = path.join(tmpDir, `session-${conversationId}.json`);
-
-    try {
-      // Write session data to temp file
-      await fs.writeFile(tmpFile, JSON.stringify(sessionData, null, 2), 'utf8');
-
-      console.log(chalk.gray(`📁 Created temp file: ${tmpFile}`));
-      console.log(chalk.gray(`📤 Uploading to x0.at...`));
-
-      // Upload to x0.at using curl with form data
-      // x0.at API: curl -F'file=@yourfile.png' https://x0.at
-      // Response: Direct URL in plain text
-      const { stdout, stderr } = await execAsync(
-        `curl -s -F "file=@${tmpFile}" ${this.uploadUrl}`,
-        { maxBuffer: 10 * 1024 * 1024 } // 10MB buffer
-      );
-
-      // x0.at returns URL directly in plain text
-      const uploadUrl = stdout.trim();
-
-      // Validate response
-      if (!uploadUrl || !uploadUrl.startsWith('http')) {
-        throw new Error(`Invalid response from x0.at: ${uploadUrl || stderr}`);
-      }
-
-      console.log(chalk.green(`✅ Uploaded to x0.at successfully`));
-      console.log(chalk.yellow(`⚠️  Files kept for 3-100 days (based on size)`));
-      console.log(chalk.gray(`🔓 Note: Files are not encrypted by default`));
-
-      // Clean up temp file
-      await fs.remove(tmpFile);
-
-      return uploadUrl;
-    } catch (error) {
-      // Clean up temp file on error
-      await fs.remove(tmpFile).catch(() => {});
-      throw error;
-    }
-  }
-
-  /**
    * Clone a session from a shared URL
    * Downloads the session and places it in the correct Claude Code location
    * @param {string} url - URL to download session from
@@ -298,30 +259,142 @@ class SessionSharing {
   }
 
   /**
-   * Download session data from URL
+   * Validate a URL is acceptable as a session-clone source. Throws on
+   * invalid input. Pure function, no I/O.
+   * @param {string} url
+   * @returns {URL} A parsed URL object ready for fetch().
+   */
+  validateCloneUrl(url) {
+    if (typeof url !== 'string' || url.trim() === '') {
+      throw new Error('A clone URL is required');
+    }
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new Error('Clone URL is not a valid URL');
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error(`Unsupported scheme: ${parsed.protocol}`);
+    }
+    // Exact match only. Subdomains of the allowed hosts are not implicitly
+    // trusted: if a specific subdomain ever needs to be permitted, add it to
+    // ALLOWED_CLONE_HOSTS by name.
+    const host = parsed.hostname.toLowerCase();
+    if (!ALLOWED_CLONE_HOSTS.has(host)) {
+      throw new Error(`Host not in clone allowlist: ${parsed.hostname}`);
+    }
+    return parsed;
+  }
+
+  /**
+   * Download session data from a clone URL using native fetch with an
+   * allowlist of hosts, a hard timeout, and a max-body cap. Replaces a
+   * prior shell-out implementation that built the command line from the
+   * caller-supplied URL.
    * @param {string} url - URL to download from
-   * @returns {Promise<Object>} Session data
+   * @returns {Promise<Object>} Session data parsed from JSON
    */
   async downloadSession(url) {
+    let target = this.validateCloneUrl(url);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+
+    let response;
     try {
-      // Use curl to download (works with x0.at and other services)
-      const { stdout, stderr } = await execAsync(`curl -L "${url}"`, {
-        maxBuffer: 50 * 1024 * 1024 // 50MB buffer for large sessions
-      });
-
-      if (stderr && !stdout) {
-        throw new Error(`Download failed: ${stderr}`);
+      // Follow redirects manually so each hop is re-validated against the
+      // allowlist. Letting fetch follow them implicitly would let an
+      // allowlisted host bounce the request to internal IPs or arbitrary
+      // origins, defeating the host check.
+      for (let hop = 0; hop <= MAX_CLONE_REDIRECTS; hop++) {
+        response = await fetch(target.toString(), {
+          redirect: 'manual',
+          signal: controller.signal,
+          headers: { 'Accept': 'application/json, text/plain;q=0.9, */*;q=0.5' },
+        });
+        if (response.status < 300 || response.status >= 400) break;
+        const location = response.headers.get('location');
+        if (!location) {
+          throw new Error(`Redirect with no Location header (HTTP ${response.status})`);
+        }
+        target = this.validateCloneUrl(new URL(location, target).toString());
       }
-
-      // Parse JSON response
-      const sessionData = JSON.parse(stdout);
-      return sessionData;
+      if (response.status >= 300 && response.status < 400) {
+        throw new Error(`Too many redirects (limit ${MAX_CLONE_REDIRECTS})`);
+      }
     } catch (error) {
-      if (error.message.includes('Unexpected token')) {
-        throw new Error('Invalid session file - corrupted or not a Claude Code session');
+      if (error?.name === 'AbortError') {
+        throw new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s`);
       }
-      throw error;
+      throw error instanceof Error ? error : new Error(`Download failed: ${error}`);
+    } finally {
+      clearTimeout(timeout);
     }
+
+    if (!response.ok) {
+      throw new Error(`Download failed: HTTP ${response.status} ${response.statusText}`);
+    }
+
+    // Reject early if the server claims a size over the cap. Number(null) is
+    // 0 so a missing header passes through; a malformed header parses as NaN
+    // and we treat that as "no claim".
+    const lengthHeader = response.headers.get('content-length');
+    if (lengthHeader) {
+      const claimed = Number(lengthHeader);
+      if (Number.isFinite(claimed) && claimed > MAX_DOWNLOAD_BYTES) {
+        throw new Error(`Session file too large: ${claimed} bytes (max ${MAX_DOWNLOAD_BYTES})`);
+      }
+    }
+
+    // Stream the body so a host that omits or lies about content-length can't
+    // make us buffer an unbounded payload before the cap check fires.
+    const buffer = await this._readBodyWithCap(response, controller);
+
+    try {
+      return JSON.parse(buffer.toString('utf8'));
+    } catch (error) {
+      // Include the underlying parser message and a short preview so an HTML
+      // error page from the host doesn't look like a "corrupted file" to the
+      // user.
+      const preview = buffer.toString('utf8', 0, 200);
+      throw new Error(
+        `Invalid session file - not valid JSON (${error.message}). ` +
+        `Response started with: ${JSON.stringify(preview)}`
+      );
+    }
+  }
+
+  /**
+   * Read a fetch Response body into a Buffer, aborting as soon as the
+   * accumulated byte count exceeds MAX_DOWNLOAD_BYTES.
+   * @param {Response} response
+   * @param {AbortController} controller
+   * @returns {Promise<Buffer>}
+   * @private
+   */
+  async _readBodyWithCap(response, controller) {
+    if (!response.body || typeof response.body.getReader !== 'function') {
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (buffer.length > MAX_DOWNLOAD_BYTES) {
+        throw new Error(`Session file too large: ${buffer.length} bytes (max ${MAX_DOWNLOAD_BYTES})`);
+      }
+      return buffer;
+    }
+    const reader = response.body.getReader();
+    const chunks = [];
+    let received = 0;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > MAX_DOWNLOAD_BYTES) {
+        try { controller.abort(); } catch { /* already aborted */ }
+        throw new Error(`Session file too large: exceeded ${MAX_DOWNLOAD_BYTES} bytes mid-stream`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks);
   }
 
   /**

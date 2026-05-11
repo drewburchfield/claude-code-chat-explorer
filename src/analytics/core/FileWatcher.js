@@ -37,13 +37,31 @@ class FileWatcher {
   }
 
   /**
-   * Setup file watchers for real-time updates
+   * Setup file watchers for real-time updates.
+   *
+   * Callbacks (run in this order for each change event):
+   *   1. dataCache.invalidateFile(filePath) - drop stale per-file cache
+   *   2. fileChangeCallback(filePath) - re-index the changed file into the DB
+   *      (this is the only callback that mutates the persistent store)
+   *   3. conversationChangeCallback(conversationId) - debounced fan-out for UI
+   *
    * @param {string} claudeDir - Path to Claude directory
-   * @param {Function} dataRefreshCallback - Callback to refresh data
-   * @param {Function} processRefreshCallback - Callback to refresh process data
-   * @param {Object} dataCache - DataCache instance for invalidation
+   * @param {Function} dataRefreshCallback - Refresh in-memory view (no DB writes)
+   * @param {Function} processRefreshCallback - Process-status refresher
+   * @param {Object}   dataCache - DataCache instance for per-file invalidation
+   * @param {Function} conversationChangeCallback - Per-conversation UI fan-out
+   * @param {Function} fileChangeCallback - Per-file index/refresh callback
+   * @param {Function} fullReindexCallback - Full re-index callback for periodic
    */
-  setupFileWatchers(claudeDir, dataRefreshCallback, processRefreshCallback, dataCache = null, conversationChangeCallback = null) {
+  setupFileWatchers(
+    claudeDir,
+    dataRefreshCallback,
+    processRefreshCallback,
+    dataCache = null,
+    conversationChangeCallback = null,
+    fileChangeCallback = null,
+    fullReindexCallback = null
+  ) {
     console.log(chalk.blue('👀 Setting up file watchers for real-time updates...'));
 
     this.claudeDir = claudeDir;
@@ -51,6 +69,8 @@ class FileWatcher {
     this.processRefreshCallback = processRefreshCallback;
     this.dataCache = dataCache;
     this.conversationChangeCallback = conversationChangeCallback;
+    this.fileChangeCallback = fileChangeCallback;
+    this.fullReindexCallback = fullReindexCallback;
     this.metrics.startedAt = new Date().toISOString();
 
     this.setupConversationWatcher();
@@ -61,20 +81,46 @@ class FileWatcher {
   }
 
   /**
-   * Setup watcher for conversation files (.jsonl)
+   * Build a chokidar options object that honours CHOKIDAR_USEPOLLING /
+   * CHOKIDAR_INTERVAL env vars. Polling is the only mode that reliably
+   * sees host filesystem events from inside Docker Desktop's Linux VM on
+   * macOS and Windows; on native Linux it is also a safe fallback.
+   *
+   * @param {Object} overrides - Watcher-specific options merged on top
+   * @returns {Object} Options ready for chokidar.watch(...)
    */
-  setupConversationWatcher() {
-    const conversationWatcher = chokidar.watch([
-      path.join(this.claudeDir, '**/*.jsonl')
-    ], {
+  buildChokidarOptions(overrides = {}) {
+    const usePollingEnv = (process.env.CHOKIDAR_USEPOLLING || '').toLowerCase();
+    const usePolling = usePollingEnv === '1' || usePollingEnv === 'true';
+    const interval = Number(process.env.CHOKIDAR_INTERVAL) > 0
+      ? Number(process.env.CHOKIDAR_INTERVAL)
+      : 2000;
+
+    const baseOptions = {
       persistent: true,
       ignoreInitial: true,
       ignored: (watchPath) => this.shouldIgnoreWatchPath(watchPath),
+      usePolling,
+      interval,
+      binaryInterval: interval * 2,
+    };
+
+    return Object.assign(baseOptions, overrides);
+  }
+
+  /**
+   * Setup watcher for conversation files (.jsonl)
+   */
+  setupConversationWatcher() {
+    const watcherOptions = this.buildChokidarOptions({
       awaitWriteFinish: {
         stabilityThreshold: 500,
         pollInterval: 100
       }
     });
+    const conversationWatcher = chokidar.watch([
+      path.join(this.claudeDir, '**/*.jsonl')
+    ], watcherOptions);
 
     conversationWatcher.on('change', async (filePath) => {
       this.metrics.lastEventAt = new Date().toISOString();
@@ -85,12 +131,29 @@ class FileWatcher {
         this.dataCache.invalidateFile(filePath);
       }
 
+      if (this.fileChangeCallback && filePath) {
+        try {
+          await this.fileChangeCallback(filePath);
+        } catch (error) {
+          this.metrics.dataRefreshErrors += 1;
+          console.error(chalk.red('fileChangeCallback error (change):'), error?.stack || error);
+        }
+      }
+
       if (this.conversationChangeCallback && conversationId) {
         this.debouncedConversationChange(conversationId, filePath);
       }
     });
 
-    conversationWatcher.on('add', async () => {
+    conversationWatcher.on('add', async (filePath) => {
+      if (this.fileChangeCallback && filePath) {
+        try {
+          await this.fileChangeCallback(filePath);
+        } catch (error) {
+          this.metrics.dataRefreshErrors += 1;
+          console.error(chalk.red('fileChangeCallback error (add):'), error?.stack || error);
+        }
+      }
       await this.triggerDataRefresh('conversationAdd');
     });
 
@@ -105,12 +168,11 @@ class FileWatcher {
    * Setup watcher for project directories
    */
   setupProjectWatcher() {
-    const projectWatcher = chokidar.watch(this.claudeDir, {
-      persistent: true,
-      ignoreInitial: true,
+    const projectOptions = this.buildChokidarOptions({
       depth: 2,
       ignored: (watchPath) => this.shouldIgnoreWatchPath(watchPath) || /\.jsonl$/.test(watchPath)
     });
+    const projectWatcher = chokidar.watch(this.claudeDir, projectOptions);
 
     projectWatcher.on('addDir', async () => {
       await this.triggerDataRefresh('projectAddDir');
@@ -127,9 +189,12 @@ class FileWatcher {
    * Setup periodic refresh intervals
    */
   setupPeriodicRefresh() {
-    // Periodic refresh to catch any missed changes (reduced frequency)
+    // Periodic fallback to catch any change events that didn't reach us
+    // (host-volume watching in Docker, transient watcher death, etc.).
+    // We drop the in-memory cache and re-index from disk so the next API
+    // call sees fresh data even when no chokidar events ever fired.
     const dataRefreshInterval = setInterval(async () => {
-      await this.triggerDataRefresh('periodic');
+      await this.runPeriodicFallback();
     }, 120000); // Every 2 minutes (reduced from 30 seconds)
 
     this.intervals.push(dataRefreshInterval);
@@ -142,6 +207,42 @@ class FileWatcher {
     }, 30000); // Every 30 seconds (reduced from 10 seconds)
 
     this.intervals.push(processRefreshInterval);
+  }
+
+  /**
+   * Periodic fallback: invalidate the per-file cache, re-index the store,
+   * and refresh the in-memory view. Exposed so tests can drive it without
+   * waiting for the 2-minute interval.
+   */
+  async runPeriodicFallback() {
+    if (this.dataCache && typeof this.dataCache.invalidateAll === 'function') {
+      try {
+        this.dataCache.invalidateAll();
+      } catch (error) {
+        // A half-cleared cache would let the re-index pass run against
+        // stale computed results, which is strictly worse than skipping
+        // this tick. Bail out and record the failure so /api/metrics
+        // shows it.
+        this.metrics.dataRefreshErrors += 1;
+        console.error(
+          chalk.red('invalidateAll failed during periodic fallback:'),
+          error?.stack || error
+        );
+        return;
+      }
+    }
+    if (this.fullReindexCallback) {
+      try {
+        await this.fullReindexCallback();
+      } catch (error) {
+        this.metrics.dataRefreshErrors += 1;
+        console.error(
+          chalk.red('fullReindexCallback error:'),
+          error?.stack || error
+        );
+      }
+    }
+    await this.triggerDataRefresh('periodic');
   }
 
   /**
@@ -311,13 +412,17 @@ class FileWatcher {
       // Clear existing watchers
       this.stop();
       
-      // Restart watchers
+      // Restart watchers. Pass through every callback we already have so a
+      // resume after suspend doesn't silently drop the per-file index path
+      // or the periodic full-reindex path.
       this.setupFileWatchers(
-        this.claudeDir, 
-        this.dataRefreshCallback, 
+        this.claudeDir,
+        this.dataRefreshCallback,
         this.processRefreshCallback,
         this.dataCache,
-        this.conversationChangeCallback
+        this.conversationChangeCallback,
+        this.fileChangeCallback,
+        this.fullReindexCallback
       );
     }
   }
