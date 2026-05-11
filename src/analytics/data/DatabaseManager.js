@@ -121,6 +121,43 @@ class DatabaseManager {
 
     // Migration: Add cwd column for project name resolution
     this._migrateCwdColumn();
+
+    // FTS content schema: the search corpus now includes tool inputs
+    // and tool results, not just message text. Bumping the user_version
+    // forces a one-time wipe of the FTS index and the file_index
+    // mtime cache, so the next indexer pass re-extracts every session.
+    this._migrateFtsContentVersion();
+  }
+
+  /**
+   * SQLite `user_version` is a 32-bit int meant exactly for this — we
+   * bump it whenever the FTS extraction logic changes shape (added
+   * fields, prefix tags, tokenizer tweaks) and use the mismatch as
+   * the signal to wipe + reindex. Cheap to do on a local SQLite file
+   * with a few thousand conversations.
+   *
+   * Versions:
+   *   0 = pre-versioning (only `text` blocks indexed)
+   *   1 = adds `[TOOL:<name>]` and `[TOOL_RESULT]` content (PR 5)
+   * @private
+   */
+  _migrateFtsContentVersion() {
+    const TARGET_VERSION = 1;
+    try {
+      const current = this.db.pragma('user_version', { simple: true });
+      if (current >= TARGET_VERSION) return;
+
+      console.log(chalk.cyan(`📦 FTS schema bump: user_version ${current} → ${TARGET_VERSION}; clearing FTS index for reindex.`));
+      // Drop just the FTS data, leave the conversations table alone -
+      // the upcoming indexer pass will re-populate FTS from the same
+      // JSONL files. Clearing file_index forces the watcher's
+      // mtime-skip check to treat every file as new.
+      this.db.prepare(`DELETE FROM conversation_fts`).run();
+      this.db.prepare(`DELETE FROM file_index`).run();
+      this.db.pragma(`user_version = ${TARGET_VERSION}`);
+    } catch (err) {
+      console.warn(chalk.yellow(`⚠️ FTS content version migration failed: ${err.message}`));
+    }
   }
 
   /**
