@@ -16,6 +16,7 @@ const ALLOWED_CLONE_HOSTS = new Set([
 
 const DOWNLOAD_TIMEOUT_MS = 15000;
 const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024; // 50 MiB
+const MAX_CLONE_REDIRECTS = 4;
 
 /**
  * SessionSharing - Handles exporting Claude Code sessions as downloadable context
@@ -276,11 +277,11 @@ class SessionSharing {
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       throw new Error(`Unsupported scheme: ${parsed.protocol}`);
     }
+    // Exact match only. Subdomains of the allowed hosts are not implicitly
+    // trusted: if a specific subdomain ever needs to be permitted, add it to
+    // ALLOWED_CLONE_HOSTS by name.
     const host = parsed.hostname.toLowerCase();
-    const allowed = [...ALLOWED_CLONE_HOSTS].some(allowedHost => {
-      return host === allowedHost || host.endsWith('.' + allowedHost);
-    });
-    if (!allowed) {
+    if (!ALLOWED_CLONE_HOSTS.has(host)) {
       throw new Error(`Host not in clone allowlist: ${parsed.hostname}`);
     }
     return parsed;
@@ -295,23 +296,38 @@ class SessionSharing {
    * @returns {Promise<Object>} Session data parsed from JSON
    */
   async downloadSession(url) {
-    const parsed = this.validateCloneUrl(url);
+    let target = this.validateCloneUrl(url);
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
 
     let response;
     try {
-      response = await fetch(parsed.toString(), {
-        redirect: 'follow',
-        signal: controller.signal,
-        headers: { 'Accept': 'application/json, text/plain;q=0.9, */*;q=0.5' },
-      });
+      // Follow redirects manually so each hop is re-validated against the
+      // allowlist. Letting fetch follow them implicitly would let an
+      // allowlisted host bounce the request to internal IPs or arbitrary
+      // origins, defeating the host check.
+      for (let hop = 0; hop <= MAX_CLONE_REDIRECTS; hop++) {
+        response = await fetch(target.toString(), {
+          redirect: 'manual',
+          signal: controller.signal,
+          headers: { 'Accept': 'application/json, text/plain;q=0.9, */*;q=0.5' },
+        });
+        if (response.status < 300 || response.status >= 400) break;
+        const location = response.headers.get('location');
+        if (!location) {
+          throw new Error(`Redirect with no Location header (HTTP ${response.status})`);
+        }
+        target = this.validateCloneUrl(new URL(location, target).toString());
+      }
+      if (response.status >= 300 && response.status < 400) {
+        throw new Error(`Too many redirects (limit ${MAX_CLONE_REDIRECTS})`);
+      }
     } catch (error) {
       if (error?.name === 'AbortError') {
         throw new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s`);
       }
-      throw new Error(`Download failed: ${error.message}`);
+      throw error instanceof Error ? error : new Error(`Download failed: ${error}`);
     } finally {
       clearTimeout(timeout);
     }
@@ -320,21 +336,65 @@ class SessionSharing {
       throw new Error(`Download failed: HTTP ${response.status} ${response.statusText}`);
     }
 
+    // Reject early if the server claims a size over the cap. Number(null) is
+    // 0 so a missing header passes through; a malformed header parses as NaN
+    // and we treat that as "no claim".
     const lengthHeader = response.headers.get('content-length');
-    if (lengthHeader && Number(lengthHeader) > MAX_DOWNLOAD_BYTES) {
-      throw new Error(`Session file too large: ${lengthHeader} bytes (max ${MAX_DOWNLOAD_BYTES})`);
+    if (lengthHeader) {
+      const claimed = Number(lengthHeader);
+      if (Number.isFinite(claimed) && claimed > MAX_DOWNLOAD_BYTES) {
+        throw new Error(`Session file too large: ${claimed} bytes (max ${MAX_DOWNLOAD_BYTES})`);
+      }
     }
 
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length > MAX_DOWNLOAD_BYTES) {
-      throw new Error(`Session file too large: ${buffer.length} bytes (max ${MAX_DOWNLOAD_BYTES})`);
-    }
+    // Stream the body so a host that omits or lies about content-length can't
+    // make us buffer an unbounded payload before the cap check fires.
+    const buffer = await this._readBodyWithCap(response, controller);
 
     try {
       return JSON.parse(buffer.toString('utf8'));
-    } catch {
-      throw new Error('Invalid session file - corrupted or not a Claude Code session');
+    } catch (error) {
+      // Include the underlying parser message and a short preview so an HTML
+      // error page from the host doesn't look like a "corrupted file" to the
+      // user.
+      const preview = buffer.toString('utf8', 0, 200);
+      throw new Error(
+        `Invalid session file - not valid JSON (${error.message}). ` +
+        `Response started with: ${JSON.stringify(preview)}`
+      );
     }
+  }
+
+  /**
+   * Read a fetch Response body into a Buffer, aborting as soon as the
+   * accumulated byte count exceeds MAX_DOWNLOAD_BYTES.
+   * @param {Response} response
+   * @param {AbortController} controller
+   * @returns {Promise<Buffer>}
+   * @private
+   */
+  async _readBodyWithCap(response, controller) {
+    if (!response.body || typeof response.body.getReader !== 'function') {
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (buffer.length > MAX_DOWNLOAD_BYTES) {
+        throw new Error(`Session file too large: ${buffer.length} bytes (max ${MAX_DOWNLOAD_BYTES})`);
+      }
+      return buffer;
+    }
+    const reader = response.body.getReader();
+    const chunks = [];
+    let received = 0;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > MAX_DOWNLOAD_BYTES) {
+        try { controller.abort(); } catch { /* already aborted */ }
+        throw new Error(`Session file too large: exceeded ${MAX_DOWNLOAD_BYTES} bytes mid-stream`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks);
   }
 
   /**
