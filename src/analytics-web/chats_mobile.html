@@ -5864,8 +5864,16 @@
             document.getElementById('analyticsCacheCreation').textContent = analytics.tokenUsage.cacheCreationTokens.toLocaleString();
             document.getElementById('analyticsCacheReads').textContent = analytics.tokenUsage.cacheReadTokens.toLocaleString();
 
-            // Cost estimate
-            document.getElementById('analyticsCostEstimate').textContent = `$${analytics.costEstimate.total}`;
+            // Cost estimate. When `isUnknownModel` is set the price was
+            // computed with a neutral fallback rate (we don't have a
+            // row for this model), so we suffix a "~" so the figure
+            // doesn't read as authoritative.
+            const costPrefix = analytics.costEstimate.isUnknownModel ? '~$' : '$';
+            document.getElementById('analyticsCostEstimate').textContent =
+              `${costPrefix}${analytics.costEstimate.total}`;
+            document.getElementById('analyticsCostEstimate').title = analytics.costEstimate.isUnknownModel
+              ? `Approximate: model "${analytics.modelInfo.primaryModel}" isn't in the pricing table; Sonnet rates used as a fallback.`
+              : `Priced against the rate row for ${analytics.modelInfo.primaryModel}.`;
 
             // Model info
             document.getElementById('analyticsPrimaryModel').textContent = analytics.modelInfo.primaryModel;
