@@ -189,9 +189,12 @@ class FileWatcher {
    * Setup periodic refresh intervals
    */
   setupPeriodicRefresh() {
-    // Periodic refresh to catch any missed changes (reduced frequency)
+    // Periodic fallback to catch any change events that didn't reach us
+    // (host-volume watching in Docker, transient watcher death, etc.).
+    // We drop the in-memory cache and re-index from disk so the next API
+    // call sees fresh data even when no chokidar events ever fired.
     const dataRefreshInterval = setInterval(async () => {
-      await this.triggerDataRefresh('periodic');
+      await this.runPeriodicFallback();
     }, 120000); // Every 2 minutes (reduced from 30 seconds)
 
     this.intervals.push(dataRefreshInterval);
@@ -204,6 +207,26 @@ class FileWatcher {
     }, 30000); // Every 30 seconds (reduced from 10 seconds)
 
     this.intervals.push(processRefreshInterval);
+  }
+
+  /**
+   * Periodic fallback: invalidate the per-file cache, re-index the store,
+   * and refresh the in-memory view. Exposed so tests can drive it without
+   * waiting for the 2-minute interval.
+   */
+  async runPeriodicFallback() {
+    if (this.dataCache && typeof this.dataCache.invalidateAll === 'function') {
+      try { this.dataCache.invalidateAll(); }
+      catch (error) { console.warn(chalk.yellow('⚠️  invalidateAll error:'), error?.message || error); }
+    }
+    if (this.fullReindexCallback) {
+      try { await this.fullReindexCallback(); }
+      catch (error) {
+        this.metrics.dataRefreshErrors += 1;
+        console.warn(chalk.yellow('⚠️  fullReindexCallback error:'), error?.message || error);
+      }
+    }
+    await this.triggerDataRefresh('periodic');
   }
 
   /**

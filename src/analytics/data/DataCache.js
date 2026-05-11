@@ -497,13 +497,37 @@ class DataCache {
    */
   invalidateComputations() {
     ['sessions', 'summary'].forEach(key => {
-      this.caches[key] = { 
-        data: null, 
-        timestamp: 0, 
+      this.caches[key] = {
+        data: null,
+        timestamp: 0,
         dependencies: new Set(),
         dependencyTimestamps: new Map()
       };
     });
+    this.metrics.computationsInvalidated += 2;
+  }
+
+  /**
+   * Drop every cached file entry and every cached computation, but
+   * preserve cumulative metrics. Used by the periodic fallback so that
+   * if the file watcher missed an event the next read pulls fresh data
+   * from disk instead of serving a stale cached parse.
+   */
+  invalidateAll() {
+    let fileEntriesCleared = 0;
+    Object.values(this.caches).forEach(cache => {
+      if (cache instanceof Map) {
+        fileEntriesCleared += cache.size;
+        cache.clear();
+      } else {
+        cache.data = null;
+        cache.timestamp = 0;
+        cache.dependencies = new Set();
+        cache.dependencyTimestamps = new Map();
+      }
+    });
+    this.metrics.filesInvalidated += fileEntriesCleared;
+    this.metrics.invalidations += 1;
     this.metrics.computationsInvalidated += 2;
   }
 
