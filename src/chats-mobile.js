@@ -922,12 +922,47 @@ class ChatsMobile {
         this.handleDataRefresh.bind(this),
         () => {}, // processRefreshCallback (not needed for mobile)
         this.dataCache,
-        this.handleConversationChange.bind(this)
+        this.handleConversationChange.bind(this),
+        this.handleFileChange.bind(this),
+        this.handleFullReindex.bind(this)
       );
-      
+
       this.log('info', chalk.green('👀 File watching setup successful'));
     } catch (error) {
       this.log('warn', chalk.yellow('⚠️  File watching setup failed:', error.message));
+    }
+  }
+
+  /**
+   * Persist a single file's contents to the database, then refresh the
+   * in-memory view. This is the only path on the watcher side that mutates
+   * the persistent store; the periodic fallback uses handleFullReindex.
+   *
+   * @param {string} filePath - Absolute path to the changed .jsonl file
+   */
+  async handleFileChange(filePath) {
+    try {
+      if (this.useDatabaseBackend && this.databaseBackend?.isInitialized) {
+        await this.databaseBackend.indexFile(filePath);
+      }
+    } catch (error) {
+      console.error('Error indexing changed file:', error?.message || error);
+    }
+    // Defer the data refresh through the existing debounced channel.
+    await this.handleDataRefresh();
+  }
+
+  /**
+   * Full re-index entry point used by the periodic fallback. Cheap on the
+   * incremental path (Indexer skips files whose mtime+size haven't changed).
+   */
+  async handleFullReindex() {
+    try {
+      if (this.useDatabaseBackend && this.databaseBackend?.isInitialized) {
+        await this.databaseBackend.runIndex();
+      }
+    } catch (error) {
+      console.warn('Periodic re-index error:', error?.message || error);
     }
   }
 
@@ -938,7 +973,7 @@ class ChatsMobile {
     if (this.refreshTimeout) {
       clearTimeout(this.refreshTimeout);
     }
-    
+
     this.refreshTimeout = setTimeout(async () => {
       try {
         await this.loadInitialData();

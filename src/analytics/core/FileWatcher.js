@@ -37,13 +37,31 @@ class FileWatcher {
   }
 
   /**
-   * Setup file watchers for real-time updates
+   * Setup file watchers for real-time updates.
+   *
+   * Callbacks (run in this order for each change event):
+   *   1. dataCache.invalidateFile(filePath) - drop stale per-file cache
+   *   2. fileChangeCallback(filePath) - re-index the changed file into the DB
+   *      (this is the only callback that mutates the persistent store)
+   *   3. conversationChangeCallback(conversationId) - debounced fan-out for UI
+   *
    * @param {string} claudeDir - Path to Claude directory
-   * @param {Function} dataRefreshCallback - Callback to refresh data
-   * @param {Function} processRefreshCallback - Callback to refresh process data
-   * @param {Object} dataCache - DataCache instance for invalidation
+   * @param {Function} dataRefreshCallback - Refresh in-memory view (no DB writes)
+   * @param {Function} processRefreshCallback - Process-status refresher
+   * @param {Object}   dataCache - DataCache instance for per-file invalidation
+   * @param {Function} conversationChangeCallback - Per-conversation UI fan-out
+   * @param {Function} fileChangeCallback - Per-file index/refresh callback
+   * @param {Function} fullReindexCallback - Full re-index callback for periodic
    */
-  setupFileWatchers(claudeDir, dataRefreshCallback, processRefreshCallback, dataCache = null, conversationChangeCallback = null) {
+  setupFileWatchers(
+    claudeDir,
+    dataRefreshCallback,
+    processRefreshCallback,
+    dataCache = null,
+    conversationChangeCallback = null,
+    fileChangeCallback = null,
+    fullReindexCallback = null
+  ) {
     console.log(chalk.blue('👀 Setting up file watchers for real-time updates...'));
 
     this.claudeDir = claudeDir;
@@ -51,6 +69,8 @@ class FileWatcher {
     this.processRefreshCallback = processRefreshCallback;
     this.dataCache = dataCache;
     this.conversationChangeCallback = conversationChangeCallback;
+    this.fileChangeCallback = fileChangeCallback;
+    this.fullReindexCallback = fullReindexCallback;
     this.metrics.startedAt = new Date().toISOString();
 
     this.setupConversationWatcher();
@@ -85,12 +105,29 @@ class FileWatcher {
         this.dataCache.invalidateFile(filePath);
       }
 
+      if (this.fileChangeCallback && filePath) {
+        try {
+          await this.fileChangeCallback(filePath);
+        } catch (error) {
+          this.metrics.dataRefreshErrors += 1;
+          console.warn(chalk.yellow('⚠️  fileChangeCallback error:'), error?.message || error);
+        }
+      }
+
       if (this.conversationChangeCallback && conversationId) {
         this.debouncedConversationChange(conversationId, filePath);
       }
     });
 
-    conversationWatcher.on('add', async () => {
+    conversationWatcher.on('add', async (filePath) => {
+      if (this.fileChangeCallback && filePath) {
+        try {
+          await this.fileChangeCallback(filePath);
+        } catch (error) {
+          this.metrics.dataRefreshErrors += 1;
+          console.warn(chalk.yellow('⚠️  fileChangeCallback error (add):'), error?.message || error);
+        }
+      }
       await this.triggerDataRefresh('conversationAdd');
     });
 
