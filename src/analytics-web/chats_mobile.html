@@ -1488,6 +1488,85 @@
             font-weight: 600;
         }
 
+        .thinking-block {
+            margin: 8px 0;
+            padding: 8px 12px;
+            font-size: 0.88rem;
+            color: var(--text-secondary, #8a8a8a);
+            background: rgba(120, 140, 200, 0.06);
+            border-left: 3px solid rgba(120, 140, 200, 0.45);
+            border-radius: 4px;
+        }
+
+        .thinking-block summary {
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            user-select: none;
+        }
+
+        .thinking-block summary::marker {
+            color: rgba(120, 140, 200, 0.6);
+        }
+
+        .thinking-block-label {
+            font-weight: 600;
+            font-style: italic;
+        }
+
+        .thinking-block-content {
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px dashed rgba(120, 140, 200, 0.25);
+            white-space: pre-wrap;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.82rem;
+            line-height: 1.5;
+        }
+
+        .image-block {
+            margin: 8px 0;
+        }
+
+        .image-block img {
+            max-width: 100%;
+            max-height: 420px;
+            border-radius: 6px;
+            display: block;
+        }
+
+        .watcher-health-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 8px;
+            margin-left: 8px;
+            font-size: 0.72rem;
+            font-weight: 600;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-secondary, #8a8a8a);
+            cursor: default;
+            user-select: none;
+        }
+
+        .watcher-health-badge::before {
+            content: '';
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #9ca3af;
+        }
+
+        .watcher-health-badge.healthy { color: #6ee7b7; }
+        .watcher-health-badge.healthy::before { background: #10b981; }
+        .watcher-health-badge.stale { color: #fde68a; }
+        .watcher-health-badge.stale::before { background: #f59e0b; }
+        .watcher-health-badge.errored { color: #fca5a5; }
+        .watcher-health-badge.errored::before { background: #ef4444; }
+
         .tool-summary {
             display: flex;
             align-items: center;
@@ -2132,6 +2211,8 @@
                 <div class="chat-header-content">
                     <div class="header-left">
                         <h1 class="chat-title">Claude Code Chats</h1>
+                        <span class="watcher-health-badge" id="watcherHealthBadge" title="Watcher health"
+                              role="status" aria-live="polite">checking…</span>
                     </div>
                     <div class="header-right">
                         <button class="header-btn" id="refreshBtn" title="Refresh">
@@ -2653,6 +2734,12 @@
     <script src="services/WebSocketService.js"></script>
     <script src="services/DataService.js"></script>
     <script src="services/StateService.js"></script>
+    <!-- Block-type renderer dispatch (thinking, image, unknown). Defined as
+         a UMD module so the same code is unit-tested under Node. -->
+    <script src="components/BlockRenderers.js"></script>
+    <!-- Watcher health classifier: same UMD pattern, drives the header
+         badge that surfaces when ingest is stale or failing. -->
+    <script src="components/WatcherHealth.js"></script>
 
     <script>
         class ChatsMobileApp {
@@ -2702,7 +2789,36 @@
                 this.bindEvents();
                 this.setupRealTimeUpdates();
                 this.loadToolsPreference();
+                this.startWatcherHealthPoll();
                 await this.loadConversations();
+            }
+
+            startWatcherHealthPoll() {
+                const badge = document.getElementById('watcherHealthBadge');
+                if (!badge || typeof WatcherHealth === 'undefined') return;
+
+                const refresh = async () => {
+                    try {
+                        const res = await fetch('/api/system/metrics', { cache: 'no-store' });
+                        if (!res.ok) throw new Error('HTTP ' + res.status);
+                        const metrics = await res.json();
+                        const out = WatcherHealth.classifyHealth(metrics);
+                        badge.classList.remove('healthy', 'stale', 'errored');
+                        badge.classList.add(out.status === 'unknown' ? '' : out.status);
+                        badge.textContent = out.label;
+                        badge.title = out.detail;
+                    } catch (err) {
+                        badge.classList.remove('healthy', 'stale');
+                        badge.classList.add('errored');
+                        badge.textContent = 'unreachable';
+                        badge.title = 'Metrics endpoint error: ' + (err && err.message ? err.message : err);
+                    }
+                };
+
+                refresh();
+                // 30s cadence: cheap enough to catch a freshly stuck watcher,
+                // light enough not to spam logs on a healthy instance.
+                this._watcherHealthInterval = setInterval(refresh, 30_000);
             }
 
             bindEvents() {
@@ -3502,7 +3618,7 @@
 
             formatMessageContent(content, message = null) {
                 let result = '';
-                
+
                 // Handle different content formats
                 if (Array.isArray(content)) {
                     // Assistant messages with content blocks
@@ -3514,11 +3630,12 @@
                         } else if (block.type === 'tool_result') {
                             result += this.formatToolResult(block);
                         } else {
-                            // Forward-compat: an unrecognised block type (e.g.
-                            // thinking, image, or something Claude Code added
-                            // after this client shipped) is shown as a visible
-                            // placeholder rather than dropped silently.
-                            result += this.formatUnknownBlock(block);
+                            // BlockRenderers handles thinking, image, and the
+                            // unknown-type placeholder. Keeping the dispatch
+                            // in a separate module so the renderer logic is
+                            // unit-tested under Node alongside the rest of
+                            // the suite.
+                            result += BlockRenderers.dispatchBlock(block);
                         }
                     });
                 } else if (typeof content === 'string') {
@@ -3544,21 +3661,8 @@
                 return result || '<em>Empty message</em>';
             }
 
-            formatUnknownBlock(block) {
-                const safeType = String(block && block.type ? block.type : 'unknown')
-                    .replace(/[<>&"']/g, c => ({
-                        '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;'
-                    }[c]));
-                return (
-                    '<div class="unknown-block" ' +
-                    'title="This block type is not yet rendered by the chat explorer. ' +
-                    'The underlying content is preserved on disk.">' +
-                    '<span class="unknown-block-icon">⚠️</span>' +
-                    '<span class="unknown-block-label">Unhandled block type:</span> ' +
-                    '<code>' + safeType + '</code>' +
-                    '</div>'
-                );
-            }
+            // formatUnknownBlock was moved into BlockRenderers.js so the
+            // dispatch logic (and its escape contract) is unit-testable.
 
             formatTextContent(text) {
                 if (!text) return '';

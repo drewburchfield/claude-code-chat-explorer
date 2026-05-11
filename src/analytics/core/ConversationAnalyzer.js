@@ -273,25 +273,42 @@ class ConversationAnalyzer {
       }
     }
 
-    // Second pass: attach tool_results to their corresponding tool_use entries
+    // Second pass: attach tool_results to their corresponding tool_use entries.
+    // A user message can mix tool_result blocks with other content (text,
+    // image). If the message contains *only* tool_result blocks we drop it
+    // after correlation; if it carries other content too, we keep the
+    // message and strip just the tool_result blocks so the surrounding
+    // text/image isn't lost.
     for (const item of entries) {
-      if (item.type === 'user' && item.message.content) {
-        const toolResultBlock = Array.isArray(item.message.content)
-          ? item.message.content.find(c => c.type === 'tool_result')
-          : (item.message.content.type === 'tool_result' ? item.message.content : null);
+      if (item.type !== 'user' || !item.message.content) continue;
 
-        if (toolResultBlock && toolResultBlock.tool_use_id) {
-          const toolUseEntry = toolUseMap.get(toolResultBlock.tool_use_id);
-          if (toolUseEntry) {
-            // Attach tool result to the tool use entry
-            if (!toolUseEntry.toolResults) {
-              toolUseEntry.toolResults = [];
-            }
-            toolUseEntry.toolResults.push(toolResultBlock);
-            // Mark this entry to be skipped in the output
-            toolResultIds.add(item);
-          }
-        }
+      const contentArray = Array.isArray(item.message.content)
+        ? item.message.content
+        : [item.message.content];
+
+      const toolResultBlocks = contentArray.filter(c => c && c.type === 'tool_result');
+      if (toolResultBlocks.length === 0) continue;
+
+      let correlatedAny = false;
+      for (const block of toolResultBlocks) {
+        if (!block.tool_use_id) continue;
+        const toolUseEntry = toolUseMap.get(block.tool_use_id);
+        if (!toolUseEntry) continue;
+        if (!toolUseEntry.toolResults) toolUseEntry.toolResults = [];
+        toolUseEntry.toolResults.push(block);
+        correlatedAny = true;
+      }
+      if (!correlatedAny) continue;
+
+      const nonToolResult = contentArray.filter(c => c && c.type !== 'tool_result');
+      if (nonToolResult.length === 0) {
+        // Pure tool_result message — drop it from the output entirely.
+        toolResultIds.add(item);
+      } else {
+        // Mixed content — keep the user message visible, but only with the
+        // non-tool-result blocks so the correlated results don't render
+        // twice.
+        item.message = { ...item.message, content: nonToolResult };
       }
     }
 

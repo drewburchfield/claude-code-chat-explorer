@@ -60,6 +60,25 @@ describe('Unknown block type forward-compat', () => {
     expect(thinkingBlock.thinking).toBe('considering');
   });
 
+  it('preserves an image block carried alongside a tool_result on the same user message', async () => {
+    // Prior parser behaviour: a user message containing tool_result + image
+    // had the whole entry skipped after correlation, silently dropping the
+    // image. Pin the new behaviour down so it can't regress.
+    const res = await request(app.app)
+      .get('/api/conversations/session-live/messages')
+      .expect(200);
+
+    const allBlocks = res.body.messages.flatMap(m => {
+      if (Array.isArray(m.content)) return m.content;
+      if (m.content && typeof m.content === 'object') return [m.content];
+      return [];
+    });
+    const imageBlock = allBlocks.find(b => b && b.type === 'image');
+    expect(imageBlock).toBeDefined();
+    expect(imageBlock.source.type).toBe('base64');
+    expect(imageBlock.source.media_type).toBe('image/png');
+  });
+
   it('does not crash on a record whose top-level type is unknown', async () => {
     // The fixture contains a fictitious `queue-operation` record. The
     // current parser drops it (it gates on type === 'user' | 'assistant'),
