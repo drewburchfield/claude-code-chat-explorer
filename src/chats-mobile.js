@@ -17,7 +17,8 @@ const DatabaseBackend = require('./analytics/data/DatabaseBackend');
 class ChatsMobile {
   constructor(options = {}) {
     this.app = express();
-    this.port = 9876; // Uncommon port for chats mobile
+    // options.port: explicit numeric port, or 0 for an ephemeral port (tests).
+    this.port = options.port !== undefined ? options.port : 9876;
     this.fileWatcher = new FileWatcher();
     this.stateCalculator = new StateCalculator();
     this.dataCache = new DataCache();
@@ -26,10 +27,10 @@ class ChatsMobile {
     this.webSocketServer = null;
     this.options = options;
     this.verbose = options.verbose || false;
-    
+
     // Initialize ConversationAnalyzer with proper parameters
-    const homeDir = os.homedir();
-    const claudeDir = path.join(homeDir, '.claude');
+    // options.claudeDir lets tests point at a temp directory instead of $HOME/.claude.
+    const claudeDir = options.claudeDir || path.join(os.homedir(), '.claude');
     this.claudeDir = claudeDir;
     this.conversationAnalyzer = new ConversationAnalyzer(claudeDir, this.dataCache);
 
@@ -914,9 +915,8 @@ class ChatsMobile {
    */
   async setupFileWatching() {
     try {
-      const homeDir = os.homedir();
-      const claudeDir = path.join(homeDir, '.claude');
-      
+      const claudeDir = this.claudeDir;
+
       this.fileWatcher.setupFileWatchers(
         claudeDir,
         this.handleDataRefresh.bind(this),
@@ -1250,6 +1250,11 @@ class ChatsMobile {
   async startServer() {
     return new Promise(async (resolve) => {
       this.httpServer = this.app.listen(this.port, async () => {
+        // If port was 0 (ephemeral, used by tests), record the actual port the OS assigned.
+        const address = this.httpServer.address();
+        if (address && typeof address === 'object') {
+          this.port = address.port;
+        }
         this.localUrl = `http://localhost:${this.port}`;
         console.log(chalk.green(`📱 Chats Mobile server started at ${this.localUrl}`));
         
