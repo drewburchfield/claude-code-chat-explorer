@@ -2,10 +2,20 @@ const chalk = require('chalk');
 const fs = require('fs-extra');
 const path = require('path');
 const os = require('os');
-const { exec } = require('child_process');
-const { promisify } = require('util');
-const execAsync = promisify(exec);
 const QRCode = require('qrcode');
+
+// Hosts permitted as session-clone sources. Anything else is rejected before
+// we touch the network. Keeping this list short and explicit prevents the
+// import path from being used to pull arbitrary content into ~/.claude.
+const ALLOWED_CLONE_HOSTS = new Set([
+  'x0.at',
+  'transfer.sh',
+  'file.io',
+  '0x0.st',
+]);
+
+const DOWNLOAD_TIMEOUT_MS = 15000;
+const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024; // 50 MiB
 
 /**
  * SessionSharing - Handles exporting Claude Code sessions as downloadable context
@@ -207,56 +217,6 @@ class SessionSharing {
   }
 
   /**
-   * Upload session to x0.at
-   * @param {Object} sessionData - Session export data
-   * @param {string} conversationId - Conversation ID for filename
-   * @returns {Promise<string>} Upload URL
-   */
-  async uploadToX0(sessionData, conversationId) {
-    const tmpDir = path.join(os.tmpdir(), 'claude-code-sessions');
-    await fs.ensureDir(tmpDir);
-
-    const tmpFile = path.join(tmpDir, `session-${conversationId}.json`);
-
-    try {
-      // Write session data to temp file
-      await fs.writeFile(tmpFile, JSON.stringify(sessionData, null, 2), 'utf8');
-
-      console.log(chalk.gray(`📁 Created temp file: ${tmpFile}`));
-      console.log(chalk.gray(`📤 Uploading to x0.at...`));
-
-      // Upload to x0.at using curl with form data
-      // x0.at API: curl -F'file=@yourfile.png' https://x0.at
-      // Response: Direct URL in plain text
-      const { stdout, stderr } = await execAsync(
-        `curl -s -F "file=@${tmpFile}" ${this.uploadUrl}`,
-        { maxBuffer: 10 * 1024 * 1024 } // 10MB buffer
-      );
-
-      // x0.at returns URL directly in plain text
-      const uploadUrl = stdout.trim();
-
-      // Validate response
-      if (!uploadUrl || !uploadUrl.startsWith('http')) {
-        throw new Error(`Invalid response from x0.at: ${uploadUrl || stderr}`);
-      }
-
-      console.log(chalk.green(`✅ Uploaded to x0.at successfully`));
-      console.log(chalk.yellow(`⚠️  Files kept for 3-100 days (based on size)`));
-      console.log(chalk.gray(`🔓 Note: Files are not encrypted by default`));
-
-      // Clean up temp file
-      await fs.remove(tmpFile);
-
-      return uploadUrl;
-    } catch (error) {
-      // Clean up temp file on error
-      await fs.remove(tmpFile).catch(() => {});
-      throw error;
-    }
-  }
-
-  /**
    * Clone a session from a shared URL
    * Downloads the session and places it in the correct Claude Code location
    * @param {string} url - URL to download session from
@@ -298,29 +258,82 @@ class SessionSharing {
   }
 
   /**
-   * Download session data from URL
+   * Validate a URL is acceptable as a session-clone source. Throws on
+   * invalid input. Pure function, no I/O.
+   * @param {string} url
+   * @returns {URL} A parsed URL object ready for fetch().
+   */
+  validateCloneUrl(url) {
+    if (typeof url !== 'string' || url.trim() === '') {
+      throw new Error('A clone URL is required');
+    }
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new Error('Clone URL is not a valid URL');
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error(`Unsupported scheme: ${parsed.protocol}`);
+    }
+    const host = parsed.hostname.toLowerCase();
+    const allowed = [...ALLOWED_CLONE_HOSTS].some(allowedHost => {
+      return host === allowedHost || host.endsWith('.' + allowedHost);
+    });
+    if (!allowed) {
+      throw new Error(`Host not in clone allowlist: ${parsed.hostname}`);
+    }
+    return parsed;
+  }
+
+  /**
+   * Download session data from a clone URL using native fetch with an
+   * allowlist of hosts, a hard timeout, and a max-body cap. Replaces a
+   * prior shell-out implementation that built the command line from the
+   * caller-supplied URL.
    * @param {string} url - URL to download from
-   * @returns {Promise<Object>} Session data
+   * @returns {Promise<Object>} Session data parsed from JSON
    */
   async downloadSession(url) {
+    const parsed = this.validateCloneUrl(url);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+
+    let response;
     try {
-      // Use curl to download (works with x0.at and other services)
-      const { stdout, stderr } = await execAsync(`curl -L "${url}"`, {
-        maxBuffer: 50 * 1024 * 1024 // 50MB buffer for large sessions
+      response = await fetch(parsed.toString(), {
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: { 'Accept': 'application/json, text/plain;q=0.9, */*;q=0.5' },
       });
-
-      if (stderr && !stdout) {
-        throw new Error(`Download failed: ${stderr}`);
-      }
-
-      // Parse JSON response
-      const sessionData = JSON.parse(stdout);
-      return sessionData;
     } catch (error) {
-      if (error.message.includes('Unexpected token')) {
-        throw new Error('Invalid session file - corrupted or not a Claude Code session');
+      if (error?.name === 'AbortError') {
+        throw new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s`);
       }
-      throw error;
+      throw new Error(`Download failed: ${error.message}`);
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!response.ok) {
+      throw new Error(`Download failed: HTTP ${response.status} ${response.statusText}`);
+    }
+
+    const lengthHeader = response.headers.get('content-length');
+    if (lengthHeader && Number(lengthHeader) > MAX_DOWNLOAD_BYTES) {
+      throw new Error(`Session file too large: ${lengthHeader} bytes (max ${MAX_DOWNLOAD_BYTES})`);
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > MAX_DOWNLOAD_BYTES) {
+      throw new Error(`Session file too large: ${buffer.length} bytes (max ${MAX_DOWNLOAD_BYTES})`);
+    }
+
+    try {
+      return JSON.parse(buffer.toString('utf8'));
+    } catch {
+      throw new Error('Invalid session file - corrupted or not a Claude Code session');
     }
   }
 
