@@ -81,20 +81,46 @@ class FileWatcher {
   }
 
   /**
-   * Setup watcher for conversation files (.jsonl)
+   * Build a chokidar options object that honours CHOKIDAR_USEPOLLING /
+   * CHOKIDAR_INTERVAL env vars. Polling is the only mode that reliably
+   * sees host filesystem events from inside Docker Desktop's Linux VM on
+   * macOS and Windows; on native Linux it is also a safe fallback.
+   *
+   * @param {Object} overrides - Watcher-specific options merged on top
+   * @returns {Object} Options ready for chokidar.watch(...)
    */
-  setupConversationWatcher() {
-    const conversationWatcher = chokidar.watch([
-      path.join(this.claudeDir, '**/*.jsonl')
-    ], {
+  buildChokidarOptions(overrides = {}) {
+    const usePollingEnv = (process.env.CHOKIDAR_USEPOLLING || '').toLowerCase();
+    const usePolling = usePollingEnv === '1' || usePollingEnv === 'true';
+    const interval = Number(process.env.CHOKIDAR_INTERVAL) > 0
+      ? Number(process.env.CHOKIDAR_INTERVAL)
+      : 2000;
+
+    const baseOptions = {
       persistent: true,
       ignoreInitial: true,
       ignored: (watchPath) => this.shouldIgnoreWatchPath(watchPath),
+      usePolling,
+      interval,
+      binaryInterval: interval * 2,
+    };
+
+    return Object.assign(baseOptions, overrides);
+  }
+
+  /**
+   * Setup watcher for conversation files (.jsonl)
+   */
+  setupConversationWatcher() {
+    const watcherOptions = this.buildChokidarOptions({
       awaitWriteFinish: {
         stabilityThreshold: 500,
         pollInterval: 100
       }
     });
+    const conversationWatcher = chokidar.watch([
+      path.join(this.claudeDir, '**/*.jsonl')
+    ], watcherOptions);
 
     conversationWatcher.on('change', async (filePath) => {
       this.metrics.lastEventAt = new Date().toISOString();
@@ -142,12 +168,11 @@ class FileWatcher {
    * Setup watcher for project directories
    */
   setupProjectWatcher() {
-    const projectWatcher = chokidar.watch(this.claudeDir, {
-      persistent: true,
-      ignoreInitial: true,
+    const projectOptions = this.buildChokidarOptions({
       depth: 2,
       ignored: (watchPath) => this.shouldIgnoreWatchPath(watchPath) || /\.jsonl$/.test(watchPath)
     });
+    const projectWatcher = chokidar.watch(this.claudeDir, projectOptions);
 
     projectWatcher.on('addDir', async () => {
       await this.triggerDataRefresh('projectAddDir');
