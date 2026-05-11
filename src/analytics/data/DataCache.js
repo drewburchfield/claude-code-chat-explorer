@@ -169,70 +169,60 @@ class DataCache {
       }
     }
     
-    // Second pass: correlate tool_result with tool_use (first process ALL tool_results)
+    // Second pass: correlate tool_result blocks with their tool_use parent
+    // and decide whether the carrier user message survives. If the user
+    // message contains only tool_result blocks it's dropped from the
+    // output (already represented under the assistant's toolResults). If it
+    // mixes tool_result with other content (text, image) we keep the
+    // message but strip the tool_result blocks so they don't render twice.
+    const droppedToolResultCarriers = new Set();
     for (const item of entries) {
-      if (item.type === 'user' && item.message.content) {
-        // Check if this is a tool_result entry
-        const toolResultBlock = Array.isArray(item.message.content)
-          ? item.message.content.find(c => c.type === 'tool_result')
-          : (item.message.content.type === 'tool_result' ? item.message.content : null);
-        
-        if (toolResultBlock && toolResultBlock.tool_use_id) {
-          // This is a tool_result - attach it to the corresponding tool_use
-          const toolUseEntry = toolUseMap.get(toolResultBlock.tool_use_id);
-          if (toolUseEntry) {
-            // Enhance tool result with additional metadata
-            const enhancedToolResult = {
-              ...toolResultBlock,
-              // Include additional metadata from toolUseResult if available
-              ...(item.toolUseResult && {
-                stdout: item.toolUseResult.stdout,
-                stderr: item.toolUseResult.stderr,
-                interrupted: item.toolUseResult.interrupted,
-                isImage: item.toolUseResult.isImage,
-                returnCodeInterpretation: item.toolUseResult.returnCodeInterpretation
-              })
-            };
-            
-            // Attach tool result to the tool use entry
-            if (!toolUseEntry.toolResults) {
-              toolUseEntry.toolResults = [];
-            }
-            toolUseEntry.toolResults.push(enhancedToolResult);
-            // console.log: Tool result attached successfully
-          }
-        }
+      if (item.type !== 'user' || !item.message.content) continue;
+
+      const contentArray = Array.isArray(item.message.content)
+        ? item.message.content
+        : [item.message.content];
+
+      const toolResultBlocks = contentArray.filter(c => c && c.type === 'tool_result');
+      if (toolResultBlocks.length === 0) continue;
+
+      let correlatedAny = false;
+      for (const block of toolResultBlocks) {
+        if (!block.tool_use_id) continue;
+        const toolUseEntry = toolUseMap.get(block.tool_use_id);
+        if (!toolUseEntry) continue;
+        const enhancedToolResult = {
+          ...block,
+          ...(item.toolUseResult && {
+            stdout: item.toolUseResult.stdout,
+            stderr: item.toolUseResult.stderr,
+            interrupted: item.toolUseResult.interrupted,
+            isImage: item.toolUseResult.isImage,
+            returnCodeInterpretation: item.toolUseResult.returnCodeInterpretation,
+          }),
+        };
+        if (!toolUseEntry.toolResults) toolUseEntry.toolResults = [];
+        toolUseEntry.toolResults.push(enhancedToolResult);
+        correlatedAny = true;
+      }
+      if (!correlatedAny) continue;
+
+      const nonToolResult = contentArray.filter(c => c && c.type !== 'tool_result');
+      if (nonToolResult.length === 0) {
+        droppedToolResultCarriers.add(item);
+      } else {
+        // Keep the user message but with only the non-tool-result content,
+        // so an attached image or text doesn't disappear with the
+        // correlated result.
+        item.message = { ...item.message, content: nonToolResult };
       }
     }
-    
-    // Third pass: process messages and filter out standalone tool_result entries
+
+    // Third pass: emit messages, dropping pure tool_result carriers.
     const processedMessages = [];
-    
+
     for (const item of entries) {
-      if (item.type === 'user' && item.message.content) {
-        // Check if this is a tool_result entry (skip it as we've already processed it)
-        const toolResultBlock = Array.isArray(item.message.content)
-          ? item.message.content.find(c => c.type === 'tool_result')
-          : (item.message.content.type === 'tool_result' ? item.message.content : null);
-        
-        if (toolResultBlock && toolResultBlock.tool_use_id) {
-          // Skip standalone tool_result entries - they've been attached to their tool_use
-          continue;
-        }
-      }
-      
-      // Convert to our standard format
-      if (item.toolResults) {
-        // console.log: Processing item with tool results
-      }
-      
-      // Debug specific item we're looking for
-      if (item.message && item.message.content && Array.isArray(item.message.content)) {
-        const toolUseBlock = item.message.content.find(c => c.type === 'tool_use' && c.id === 'toolu_01D8RMQYDySWAscQCC6pfDWf');
-        if (toolUseBlock) {
-          // Debug: Processing tool_use item
-        }
-      }
+      if (droppedToolResultCarriers.has(item)) continue;
       const parsed = {
         id: item.message.id || item.uuid || null,
         role: item.message.role || (item.type === 'assistant' ? 'assistant' : 'user'),
