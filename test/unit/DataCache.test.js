@@ -149,4 +149,51 @@ describe('DataCache', () => {
     expect(cache.metrics.invalidations).toBe(2);
     expect(cache.metrics.filesInvalidated).toBe(3);
   });
+
+  it('enforceSizeLimits evicts by lastAccessed, not by file mtime', () => {
+    // Two entries: one with an OLD source-file mtime but a RECENT
+    // last access, and one with a RECENT source-file mtime but an
+    // OLDER last access. The legacy implementation sorted by
+    // `timestamp` (= source mtime) and would have evicted the
+    // recently-read entry, which is the LRU-inversion bug this PR
+    // closes.
+    cache.configure({ maxCacheSize: 1 });
+    cache.caches.fileContent.set('/old-but-hot', {
+      content: 'x',
+      timestamp: 1000,               // ancient file mtime
+      lastAccessed: Date.now()       // just accessed
+    });
+    cache.caches.fileContent.set('/new-but-cold', {
+      content: 'y',
+      timestamp: Date.now(),         // freshly-modified file
+      lastAccessed: Date.now() - 60_000 // last touched a minute ago
+    });
+
+    cache.enforceSizeLimits();
+
+    expect(cache.caches.fileContent.has('/old-but-hot')).toBe(true);
+    expect(cache.caches.fileContent.has('/new-but-cold')).toBe(false);
+    expect(cache.metrics.evictions).toBe(1);
+  });
+
+  it('enforceSizeLimits falls back to timestamp for entries missing lastAccessed', () => {
+    // A cache entry written before the lastAccessed field existed
+    // should still sort correctly so we do not divide-by-zero or
+    // crash mid-eviction.
+    cache.configure({ maxCacheSize: 1 });
+    cache.caches.fileContent.set('/legacy-old', { content: 'x', timestamp: 1000 });
+    cache.caches.fileContent.set('/legacy-new', { content: 'y', timestamp: 9999 });
+
+    cache.enforceSizeLimits();
+
+    expect(cache.caches.fileContent.has('/legacy-old')).toBe(false);
+    expect(cache.caches.fileContent.has('/legacy-new')).toBe(true);
+  });
+
+  it('default maxCacheSize is high enough to hold a heavy session', () => {
+    // Pin the new default so a future "tune it down" change has to
+    // think about it explicitly. 500 covers the working set of a
+    // user with hundreds of open conversations.
+    expect(cache.config.maxCacheSize).toBe(500);
+  });
 });

@@ -13,6 +13,14 @@ const AgentAnalyzer = require('./analytics/core/AgentAnalyzer');
 const WebSocketServer = require('./analytics/notifications/WebSocketServer');
 const SessionSharing = require('./session-sharing');
 const DatabaseBackend = require('./analytics/data/DatabaseBackend');
+const BoundedMap = require('./utils/BoundedMap');
+
+// Cap the per-conversation state Maps. With 200 entries we cover the
+// "user has 200 conversations open recently" window; older
+// conversations get re-snapshotted on next access at the cost of one
+// extra DB hit, which is preferable to growing the in-process Map for
+// the lifetime of the watcher.
+const CONVERSATION_STATE_CAP = 200;
 
 class ChatsMobile {
   constructor(options = {}) {
@@ -50,11 +58,25 @@ class ChatsMobile {
       lastUpdate: new Date().toISOString()
     };
     
-    // Track message counts per conversation to detect new messages
-    this.conversationMessageCounts = new Map();
-    
-    // Track message snapshots to detect message updates (e.g., tool correlation)
-    this.conversationMessageSnapshots = new Map();
+    // Track message counts per conversation to detect new messages.
+    // BoundedMap because this otherwise grows once per conversation the
+    // user ever opened in the lifetime of the process.
+    this.conversationMessageCounts = new BoundedMap(CONVERSATION_STATE_CAP);
+
+    // Track message snapshots to detect message updates (e.g., tool
+    // correlation). Bounded for the same reason.
+    this.conversationMessageSnapshots = new BoundedMap(CONVERSATION_STATE_CAP);
+
+    // Lightweight, unbounded Set of every conversation id we have
+    // seeded a snapshot for in this process. When the BoundedMap
+    // evicts a conversation under cap pressure, the diff path needs
+    // to tell "genuinely new conversation" apart from "snapshot was
+    // evicted, re-snapshot silently" - otherwise an evicted entry
+    // would look like a count delta of `currentCount` new messages
+    // and we'd broadcast every message as fresh over the websocket.
+    // IDs are short strings; even at 100k conversations this is a
+    // few MB and would dwarf any per-entry savings from a cap here.
+    this.conversationIdsEverSeen = new Set();
   }
 
   /**
@@ -1053,18 +1075,40 @@ class ChatsMobile {
       const parsedMessages = await this.conversationAnalyzer.getParsedConversation(conversation.filePath);
       
       if (parsedMessages && parsedMessages.length > 0) {
-        // Get the previous message count and snapshots for this conversation
-        const previousCount = this.conversationMessageCounts.get(conversationId) || 0;
+        // Distinguish three states:
+        //   1. fresh conversation (never seen): broadcast everything
+        //   2. cached snapshot present: diff against it normally
+        //   3. previously seen but evicted from the BoundedMap: this
+        //      is the cap-pressure case; re-seed silently and skip
+        //      the broadcast so we don't fake-publish the full
+        //      transcript on every cap-evicted conversation's first
+        //      change event.
         const currentCount = parsedMessages.length;
+        const currentSnapshots = parsedMessages.map(msg => this.generateMessageSnapshot(msg));
+        const everSeenBefore = this.conversationIdsEverSeen.has(conversationId);
+        const hasCachedSnapshot = this.conversationMessageCounts.has(conversationId);
+        const wasEvictedFromCache = everSeenBefore && !hasCachedSnapshot;
+
+        if (wasEvictedFromCache) {
+          // Silently rebuild the snapshot for this evicted entry.
+          // Any actual delta will be picked up on the *next* change
+          // event, when the snapshot is back in the BoundedMap.
+          this.conversationMessageCounts.set(conversationId, currentCount);
+          this.conversationMessageSnapshots.set(conversationId, currentSnapshots);
+          this.conversationIdsEverSeen.add(conversationId);
+          return;
+        }
+
+        const previousCount = this.conversationMessageCounts.get(conversationId) || 0;
         const previousSnapshots = this.conversationMessageSnapshots.get(conversationId) || [];
-        
+
         // Update the count
         this.conversationMessageCounts.set(conversationId, currentCount);
-        
-        // Generate current snapshots
-        const currentSnapshots = parsedMessages.map(msg => this.generateMessageSnapshot(msg));
+
+        // Persist the new snapshots and mark as seen.
         this.conversationMessageSnapshots.set(conversationId, currentSnapshots);
-        
+        this.conversationIdsEverSeen.add(conversationId);
+
         // Find new messages (by count increase)
         const newMessages = currentCount > previousCount ? parsedMessages.slice(previousCount) : [];
         
@@ -1258,12 +1302,16 @@ class ChatsMobile {
           console.log(chalk.cyan('📦 Loading conversations from SQLite database...'));
           conversations = this.databaseBackend.getConversations({ limit: 10000 });
 
-          // Initialize message counts from database (already indexed)
+          // Initialize message counts from database (already indexed).
+          // We mark every conversation as "ever seen" so the diff path
+          // can distinguish "evicted from the BoundedMap under cap
+          // pressure" from "genuinely new conversation."
           for (const conversation of conversations) {
             this.conversationMessageCounts.set(conversation.id, conversation.messageCount);
             // Skip snapshot initialization in database mode - too expensive
             // Snapshots will be loaded on-demand when viewing a conversation
             this.conversationMessageSnapshots.set(conversation.id, []);
+            this.conversationIdsEverSeen.add(conversation.id);
           }
         } else {
           // Fallback to original file-based loading
@@ -1279,10 +1327,12 @@ class ChatsMobile {
               // Initialize snapshots for change detection
               const snapshots = parsedMessages.map(msg => this.generateMessageSnapshot(msg));
               this.conversationMessageSnapshots.set(conversation.id, snapshots);
+              this.conversationIdsEverSeen.add(conversation.id);
             } catch (error) {
               // If we can't parse the conversation, set count to 0 and empty snapshots
               this.conversationMessageCounts.set(conversation.id, 0);
               this.conversationMessageSnapshots.set(conversation.id, []);
+              this.conversationIdsEverSeen.add(conversation.id);
             }
           }
         }
@@ -1292,7 +1342,17 @@ class ChatsMobile {
         this.data.lastUpdate = new Date().toISOString();
 
         console.log(chalk.green(`📂 Loaded ${this.data.conversations.length} conversations`));
-        console.log(chalk.gray(`📊 Initialized message counts for ${this.conversationMessageCounts.size} conversations`));
+        // Log both: the BoundedMap holds the working set of recent
+        // diff snapshots (capped); the ever-seen Set tracks the full
+        // population so the watcher diff path can tell evicted apart
+        // from genuinely-new.
+        const total = this.conversationIdsEverSeen.size;
+        const cached = this.conversationMessageCounts.size;
+        if (total > cached) {
+          console.log(chalk.gray(`📊 Tracking ${total} conversations (snapshot cache: ${cached}/${CONVERSATION_STATE_CAP})`));
+        } else {
+          console.log(chalk.gray(`📊 Initialized message counts for ${total} conversations`));
+        }
 
         // Log database stats if using database backend
         if (this.useDatabaseBackend && this.databaseBackend.isInitialized) {

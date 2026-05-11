@@ -40,7 +40,11 @@ class DataCache {
       computationTTL: 20000, // 20 seconds for expensive computations
       metadataTTL: 10000, // 10 seconds for metadata
       processTTL: 1000, // 1 second for process data
-      maxCacheSize: 50, // Increased to reduce evictions
+      // Capacity per per-file cache. 500 is well below the per-entry
+      // RSS budget on a typical install and well above the ~100
+      // conversations a heavy user actually re-reads in a session, so
+      // eviction is rare in practice and harmless when it fires.
+      maxCacheSize: 500,
     };
     
     // Dependency tracking for smart invalidation
@@ -77,23 +81,26 @@ class DataCache {
       // Check if cached content is still valid
       if (cached && cached.timestamp >= stats.mtime.getTime()) {
         this.metrics.hits++;
+        cached.lastAccessed = Date.now();
         return cached.content;
       }
-      
+
       // Cache miss - read file
       this.metrics.misses++;
       const content = await fs.readFile(filepath, 'utf8');
-      
+
       this.caches.fileContent.set(filepath, {
         content,
         timestamp: stats.mtime.getTime(),
+        lastAccessed: Date.now(),
         stats: stats
       });
-      
+
       // Also cache the file stats
       this.caches.fileStats.set(filepath, {
         stats: stats,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        lastAccessed: Date.now()
       });
       
       return content;
@@ -116,19 +123,21 @@ class DataCache {
     // Check if cached parsed data is still valid
     if (cached && cached.timestamp >= fileStats.mtime.getTime()) {
       this.metrics.hits++;
+      cached.lastAccessed = Date.now();
       return cached.messages;
     }
-    
+
     // Cache miss - parse conversation with tool correlation
     this.metrics.misses++;
     const content = await this.getFileContent(filepath);
     const lines = content.trim().split('\n').filter(line => line.trim());
-    
+
     const messages = this.parseAndCorrelateToolMessages(lines);
-    
+
     this.caches.parsedConversations.set(filepath, {
       messages,
-      timestamp: fileStats.mtime.getTime()
+      timestamp: fileStats.mtime.getTime(),
+      lastAccessed: Date.now()
     });
     
     return messages;
@@ -256,18 +265,20 @@ class DataCache {
     // Check if metadata cache is still valid
     if (cached && (Date.now() - cached.timestamp) < this.config.metadataTTL) {
       this.metrics.hits++;
+      cached.lastAccessed = Date.now();
       return cached.stats;
     }
-    
+
     // Cache miss - get fresh stats
     this.metrics.misses++;
     const stats = await fs.stat(filepath);
-    
+
     this.caches.fileStats.set(filepath, {
       stats: stats,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      lastAccessed: Date.now()
     });
-    
+
     return stats;
   }
 
@@ -349,17 +360,19 @@ class DataCache {
     
     if (cached && cached.timestamp >= fileStats.mtime.getTime()) {
       this.metrics.hits++;
+      cached.lastAccessed = Date.now();
       return cached.usage;
     }
-    
+
     this.metrics.misses++;
     const usage = await calculateFn();
-    
+
     this.caches.tokenUsage.set(filepath, {
       usage,
-      timestamp: fileStats.mtime.getTime()
+      timestamp: fileStats.mtime.getTime(),
+      lastAccessed: Date.now()
     });
-    
+
     return usage;
   }
 
@@ -375,17 +388,19 @@ class DataCache {
     
     if (cached && cached.timestamp >= fileStats.mtime.getTime()) {
       this.metrics.hits++;
+      cached.lastAccessed = Date.now();
       return cached.info;
     }
-    
+
     this.metrics.misses++;
     const info = await extractFn();
-    
+
     this.caches.modelInfo.set(filepath, {
       info,
-      timestamp: fileStats.mtime.getTime()
+      timestamp: fileStats.mtime.getTime(),
+      lastAccessed: Date.now()
     });
-    
+
     return info;
   }
 
@@ -401,17 +416,19 @@ class DataCache {
     
     if (cached && cached.timestamp >= fileStats.mtime.getTime()) {
       this.metrics.hits++;
+      cached.lastAccessed = Date.now();
       return cached.squares;
     }
-    
+
     this.metrics.misses++;
     const squares = await generateFn();
-    
+
     this.caches.statusSquares.set(filepath, {
       squares,
-      timestamp: fileStats.mtime.getTime()
+      timestamp: fileStats.mtime.getTime(),
+      lastAccessed: Date.now()
     });
-    
+
     return squares;
   }
 
@@ -427,17 +444,19 @@ class DataCache {
     
     if (cached && cached.timestamp >= fileStats.mtime.getTime()) {
       this.metrics.hits++;
+      cached.lastAccessed = Date.now();
       return cached.usage;
     }
-    
+
     this.metrics.misses++;
     const usage = await extractFn();
-    
+
     this.caches.toolUsage.set(filepath, {
       usage,
-      timestamp: fileStats.mtime.getTime()
+      timestamp: fileStats.mtime.getTime(),
+      lastAccessed: Date.now()
     });
-    
+
     return usage;
   }
 
@@ -616,11 +635,18 @@ class DataCache {
 
     for (const [, cache] of caches) {
       if (cache.size > maxSize) {
-        // Convert to array and sort by timestamp (oldest first)
+        // Evict by least-recently-accessed. Older code sorted by
+        // `timestamp`, which on the per-file caches is the source
+        // file's mtime - that turned eviction into "drop the entry
+        // for the oldest file on disk," which is the opposite of LRU
+        // when the user is actively re-reading an older file.
+        // `lastAccessed` is refreshed on every cache hit, so it
+        // reflects actual usage. Fall back to `timestamp` for any
+        // entry written before this field existed.
         const entries = Array.from(cache.entries()).sort((a, b) => {
-          const timestampA = a[1].timestamp || 0;
-          const timestampB = b[1].timestamp || 0;
-          return timestampA - timestampB;
+          const recencyA = a[1].lastAccessed || a[1].timestamp || 0;
+          const recencyB = b[1].lastAccessed || b[1].timestamp || 0;
+          return recencyA - recencyB;
         });
 
         // Remove oldest entries until we're under the limit
