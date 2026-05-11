@@ -8,8 +8,8 @@ Browse, search, and explore your Claude Code conversation history. A fast, self-
 
 ![Claude Code Chat Explorer](assets/screenshot.png)
 
-> [!WARNING]
-> **Claude Code deletes conversations older than 30 days by default.** Before using this tool, [increase your retention period](#conversation-history-retention-important) or you may have already lost history.
+> [!NOTE]
+> Claude Code can be configured to clean up old transcripts via the `cleanupPeriodDays` setting. If you want this tool to browse your full history, [confirm your retention setting](#conversation-history-retention) first.
 
 ## Why This Exists
 
@@ -86,9 +86,9 @@ claude-code-chat-explorer/
 
 ## Configuration
 
-### Conversation History Retention (Important!)
+### Conversation History Retention
 
-Claude Code **deletes conversations older than 30 days by default**. If you want to preserve your history for this tool to browse, you need to increase the retention period.
+Claude Code exposes a `cleanupPeriodDays` setting that bounds how long inactive transcripts stay on disk. The default has varied across versions; check your current behavior and set an explicit value if you want this tool to browse a long history.
 
 Edit `~/.claude/settings.json` and add or modify the `cleanupPeriodDays` setting:
 
@@ -102,9 +102,9 @@ Edit `~/.claude/settings.json` and add or modify the `cleanupPeriodDays` setting
 |-------|----------|
 | `99999` | Effectively infinite (recommended) |
 | `365` | Keep conversations for 1 year |
-| `30` | Default - deletes sessions inactive for 30+ days |
+| `30` | Cleans up sessions inactive for 30+ days |
 
-**Note:** Cleanup happens when you start a new Claude Code session, not continuously. If you've already lost history, it cannot be recovered.
+**Note:** When cleanup runs, it triggers at Claude Code session start - not continuously. Anything already cleaned up cannot be recovered.
 
 If the file doesn't exist, create it:
 ```bash

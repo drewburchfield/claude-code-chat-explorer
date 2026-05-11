@@ -409,6 +409,8 @@ class ConversationAnalyzer {
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let totalCacheCreationTokens = 0;
+    let totalCacheCreation5m = 0;
+    let totalCacheCreation1h = 0;
     let totalCacheReadTokens = 0;
     let messagesWithUsage = 0;
 
@@ -417,6 +419,13 @@ class ConversationAnalyzer {
         totalInputTokens += message.usage.input_tokens || 0;
         totalOutputTokens += message.usage.output_tokens || 0;
         totalCacheCreationTokens += message.usage.cache_creation_input_tokens || 0;
+        // The API also exposes a per-tier split under
+        // usage.cache_creation when the caller requested 1h-cached
+        // prompt blocks; older transcripts predate this sub-object.
+        if (message.usage.cache_creation && typeof message.usage.cache_creation === 'object') {
+          totalCacheCreation5m += message.usage.cache_creation.ephemeral_5m_input_tokens || 0;
+          totalCacheCreation1h += message.usage.cache_creation.ephemeral_1h_input_tokens || 0;
+        }
         totalCacheReadTokens += message.usage.cache_read_input_tokens || 0;
         messagesWithUsage++;
       }
@@ -427,6 +436,8 @@ class ConversationAnalyzer {
       inputTokens: totalInputTokens,
       outputTokens: totalOutputTokens,
       cacheCreationTokens: totalCacheCreationTokens,
+      cacheCreation5mTokens: totalCacheCreation5m,
+      cacheCreation1hTokens: totalCacheCreation1h,
       cacheReadTokens: totalCacheReadTokens,
       messagesWithUsage: messagesWithUsage,
       totalMessages: parsedMessages.length,

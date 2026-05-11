@@ -14,6 +14,7 @@ const WebSocketServer = require('./analytics/notifications/WebSocketServer');
 const SessionSharing = require('./session-sharing');
 const DatabaseBackend = require('./analytics/data/DatabaseBackend');
 const BoundedMap = require('./utils/BoundedMap');
+const { priceConversation } = require('./utils/ModelPricing');
 
 // Cap the per-conversation state Maps. With 200 entries we cover the
 // "user has 200 conversations open recently" window; older
@@ -690,20 +691,35 @@ class ChatsMobile {
         const waitTimePercent = totalIterationTime > 0 ? Math.round((totalWaitTime / totalIterationTime) * 100) : 0;
         const userTimePercent = totalIterationTime > 0 ? Math.round((totalUserTime / totalIterationTime) * 100) : 0;
 
-        // Calculate cache efficiency
-        const cacheTotal = (conversation.tokenUsage?.cacheCreationTokens || 0) + (conversation.tokenUsage?.cacheReadTokens || 0);
+        // Re-attribute tokens from the parsed messages we already have
+        // in hand. The cached `conversation.tokenUsage` from the SQLite
+        // index only carries `{total, input, output}` for backwards
+        // compat; the per-tier cache buckets we need for accurate
+        // pricing live in the JSONL `usage` blocks. This call is cheap
+        // because `messages` is already loaded above.
+        const bucketUsage = this.conversationAnalyzer.calculateRealTokenUsage(messages);
+
+        const cacheTotal = (bucketUsage.cacheCreationTokens || 0) + (bucketUsage.cacheReadTokens || 0);
         const cacheEfficiency = cacheTotal > 0
-          ? Math.round((conversation.tokenUsage?.cacheReadTokens || 0) / cacheTotal * 100)
+          ? Math.round((bucketUsage.cacheReadTokens || 0) / cacheTotal * 100)
           : 0;
 
-        // Estimate cost (approximate Claude API pricing)
-        // Sonnet 4.5: $3/1M input, $15/1M output
-        // Cache write: $3.75/1M, Cache read: $0.30/1M
-        const inputCost = (conversation.tokenUsage?.inputTokens || 0) / 1000000 * 3;
-        const outputCost = (conversation.tokenUsage?.outputTokens || 0) / 1000000 * 15;
-        const cacheWriteCost = (conversation.tokenUsage?.cacheCreationTokens || 0) / 1000000 * 3.75;
-        const cacheReadCost = (conversation.tokenUsage?.cacheReadTokens || 0) / 1000000 * 0.30;
-        const totalCost = inputCost + outputCost + cacheWriteCost + cacheReadCost;
+        // Per-model pricing: previously this block hardcoded Sonnet
+        // 4.5 rates for every conversation, which over-counted Haiku
+        // runs and under-counted Opus runs by a wide margin.
+        // priceConversation() routes the token totals to the correct
+        // per-family rates and exposes an isUnknownModel flag so the
+        // UI can surface "we guessed" on out-of-table models.
+        const pricing = priceConversation({
+          tokenUsage: bucketUsage,
+          model: conversation.modelInfo?.primaryModel,
+        });
+        const inputCost = pricing.inputCost;
+        const outputCost = pricing.outputCost;
+        const cacheWriteCost = pricing.cacheWriteCost;
+        const cacheReadCost = pricing.cacheReadCost;
+        const totalCost = pricing.totalCost;
+        const isUnknownModel = pricing.isUnknownModel;
 
         // Detect agents, hooks, and components used
         const agentAnalyzer = new AgentAnalyzer();
@@ -805,13 +821,20 @@ class ChatsMobile {
           toolCalls: conversation.toolUsage?.totalToolCalls || 0,
           cacheEfficiency: `${cacheEfficiency}%`,
 
-          // Token breakdown
+          // Token breakdown. Source these from the freshly-attributed
+          // bucketUsage rather than the cached conversation record,
+          // which only carries the rolled-up totals.
           tokenUsage: {
-            inputTokens: conversation.tokenUsage?.inputTokens || 0,
-            outputTokens: conversation.tokenUsage?.outputTokens || 0,
-            cacheCreationTokens: conversation.tokenUsage?.cacheCreationTokens || 0,
-            cacheReadTokens: conversation.tokenUsage?.cacheReadTokens || 0,
-            total: conversation.tokenUsage?.total || 0
+            inputTokens: bucketUsage.inputTokens || 0,
+            outputTokens: bucketUsage.outputTokens || 0,
+            cacheCreationTokens: bucketUsage.cacheCreationTokens || 0,
+            cacheCreation5mTokens: bucketUsage.cacheCreation5mTokens || 0,
+            cacheCreation1hTokens: bucketUsage.cacheCreation1hTokens || 0,
+            cacheReadTokens: bucketUsage.cacheReadTokens || 0,
+            total: bucketUsage.total
+              || (bucketUsage.inputTokens || 0) + (bucketUsage.outputTokens || 0)
+              || conversation.tokenUsage?.total
+              || 0
           },
 
           // Cost estimate
@@ -822,7 +845,12 @@ class ChatsMobile {
               output: outputCost.toFixed(4),
               cacheWrite: cacheWriteCost.toFixed(4),
               cacheRead: cacheReadCost.toFixed(4)
-            }
+            },
+            // True when the conversation's model id didn't match a
+            // known family (Opus/Sonnet/Haiku). Sonnet rates were
+            // applied as a neutral fallback; the UI surfaces this
+            // so the user knows the number is best-effort.
+            isUnknownModel
           },
 
           // Model info with usage percentages
