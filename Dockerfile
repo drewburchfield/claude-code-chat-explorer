@@ -2,16 +2,25 @@
 # Stage 1: Build native modules
 FROM node:20-alpine AS builder
 
-# Install build dependencies for better-sqlite3 (native module)
-RUN apk add --no-cache python3 make g++
+# Install build dependencies for better-sqlite3 (native module) + curl for safe-chain installer
+RUN apk add --no-cache python3 make g++ curl
+
+# Aikido safe-chain: blocks known-malicious npm packages at install time and
+# suppresses packages younger than the configured age (default 48h) so a brand
+# new compromised version can't slip in during a build. Pinned to 1.5.3 so a
+# future safe-chain regression can't break this image build.
+RUN curl -fsSL https://github.com/AikidoSec/safe-chain/releases/download/1.5.3/install-safe-chain.sh \
+    | sh -s -- --ci
+ENV PATH="/root/.safe-chain/shims:/root/.safe-chain/bin:${PATH}"
 
 WORKDIR /app
 
 # Copy package files first for better cache utilization
 COPY package*.json ./
 
-# Install all dependencies including devDependencies for building
-RUN npm install --omit=dev
+# `npm ci` (not `npm install`) so the build is reproducible against
+# package-lock.json. `--omit=dev` skips devDependencies for the runtime image.
+RUN npm ci --omit=dev
 
 # Copy source code
 COPY src/ ./src/

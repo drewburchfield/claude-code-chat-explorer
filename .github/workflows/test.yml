@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Default permissions for every job. Codecov upload only needs read; widen at
+# the job level (not workflow level) if a future job needs more.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -23,6 +28,15 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
+
+      # Aikido safe-chain: routes every npm install in this job through
+      # Aikido Intel's malware-blocking proxy, transitive deps included.
+      # Pinned to 1.5.3 so a future safe-chain regression can't break CI.
+      - name: Install safe-chain
+        run: |
+          curl -fsSL https://github.com/AikidoSec/safe-chain/releases/download/1.5.3/install-safe-chain.sh | sh -s -- --ci
+          echo "$HOME/.safe-chain/shims" >> "$GITHUB_PATH"
+          echo "$HOME/.safe-chain/bin"   >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: npm ci
@@ -54,6 +68,12 @@ jobs:
         with:
           node-version: 20
           cache: 'npm'
+
+      - name: Install safe-chain
+        run: |
+          curl -fsSL https://github.com/AikidoSec/safe-chain/releases/download/1.5.3/install-safe-chain.sh | sh -s -- --ci
+          echo "$HOME/.safe-chain/shims" >> "$GITHUB_PATH"
+          echo "$HOME/.safe-chain/bin"   >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: npm ci
