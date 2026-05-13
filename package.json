@@ -35,9 +35,9 @@
     "ws": "^8.18.3"
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "^2.1.0",
+    "@vitest/coverage-v8": "^4.1.6",
     "supertest": "^7.0.0",
-    "vitest": "^2.1.0"
+    "vitest": "^4.1.6"
   },
   "engines": {
     "node": ">=18.0.0"
