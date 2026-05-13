@@ -1,17 +1,21 @@
 name: Tests
 
+# Both jobs install Aikido safe-chain before `npm ci` so dependency installs
+# are checked against Aikido Intel's malware feed. Pinned version is in the
+# install step. `npm safe-chain-verify` after install asserts the wrapper is
+# actually intercepting npm: if it ever silently falls back to unprotected
+# npm (e.g. PATH mis-ordering, shim not on disk), CI fails loudly.
 on:
   push:
     branches: [main, dev]
   pull_request:
-    # `branches:` here filters on the PR's BASE branch. Without `dev` listed,
-    # feature → dev PRs never trigger CI (only the later dev → main PR does).
-    # That meant feature work could merge to dev without tests running.
+    # `branches:` on `pull_request` filters the PR's BASE branch. `dev` must
+    # be listed for feature -> dev PRs to trigger this workflow.
     branches: [main, dev]
   workflow_dispatch:
 
-# Default permissions for every job. Codecov upload only needs read; widen at
-# the job level (not workflow level) if a future job needs more.
+# Workflow-wide default. Jobs only need read access; a future job that needs
+# more (e.g. release publishing) should opt in at the job level.
 permissions:
   contents: read
 
@@ -33,14 +37,18 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
 
-      # Aikido safe-chain: routes every npm install in this job through
-      # Aikido Intel's malware-blocking proxy, transitive deps included.
-      # Pinned to 1.5.3 so a future safe-chain regression can't break CI.
+      # safe-chain version is pinned: a future regression should not silently
+      # break the build. Bump deliberately when a known-good newer version exists.
       - name: Install safe-chain
         run: |
           curl -fsSL https://github.com/AikidoSec/safe-chain/releases/download/1.5.3/install-safe-chain.sh | sh -s -- --ci
           echo "$HOME/.safe-chain/shims" >> "$GITHUB_PATH"
           echo "$HOME/.safe-chain/bin"   >> "$GITHUB_PATH"
+
+      # Confirms the npm wrapper is active. Without this, a broken install
+      # falls back to unprotected npm and CI still passes (silent bypass).
+      - name: Verify safe-chain is wrapping npm
+        run: npm safe-chain-verify
 
       - name: Install dependencies
         run: npm ci
@@ -78,6 +86,9 @@ jobs:
           curl -fsSL https://github.com/AikidoSec/safe-chain/releases/download/1.5.3/install-safe-chain.sh | sh -s -- --ci
           echo "$HOME/.safe-chain/shims" >> "$GITHUB_PATH"
           echo "$HOME/.safe-chain/bin"   >> "$GITHUB_PATH"
+
+      - name: Verify safe-chain is wrapping npm
+        run: npm safe-chain-verify
 
       - name: Install dependencies
         run: npm ci

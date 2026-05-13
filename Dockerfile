@@ -2,16 +2,27 @@
 # Stage 1: Build native modules
 FROM node:20-alpine AS builder
 
-# Install build dependencies for better-sqlite3 (native module) + curl for safe-chain installer
+# Default RUN shell uses pipefail so `curl ... | sh` fails the build if curl
+# fails partway through, instead of executing a truncated installer.
+SHELL ["/bin/sh", "-eo", "pipefail", "-c"]
+
+# python3/make/g++ are needed by better-sqlite3 (native build).
+# curl is needed by the safe-chain installer below.
 RUN apk add --no-cache python3 make g++ curl
 
 # Aikido safe-chain: blocks known-malicious npm packages at install time and
 # suppresses packages younger than the configured age (default 48h) so a brand
-# new compromised version can't slip in during a build. Pinned to 1.5.3 so a
-# future safe-chain regression can't break this image build.
+# new compromised version can't slip in during a build. Version pin: a future
+# safe-chain regression should not silently break this image build.
 RUN curl -fsSL https://github.com/AikidoSec/safe-chain/releases/download/1.5.3/install-safe-chain.sh \
     | sh -s -- --ci
+
 ENV PATH="/root/.safe-chain/shims:/root/.safe-chain/bin:${PATH}"
+
+# Asserts the npm wrapper is active before any install runs. Without this, a
+# broken safe-chain install would silently fall back to unprotected npm and the
+# build would succeed with no malware checks happening.
+RUN safe-chain --version && npm safe-chain-verify
 
 WORKDIR /app
 
@@ -19,7 +30,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # `npm ci` (not `npm install`) so the build is reproducible against
-# package-lock.json. `--omit=dev` skips devDependencies for the runtime image.
+# package-lock.json.
 RUN npm ci --omit=dev
 
 # Copy source code
