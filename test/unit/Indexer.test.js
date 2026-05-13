@@ -164,14 +164,64 @@ describe('Indexer', () => {
     it('extracts text from array of content blocks', () => {
       const content = [
         { type: 'text', text: 'First paragraph' },
-        { type: 'tool_use', name: 'Read', input: {} },
         { type: 'text', text: 'Second paragraph' },
       ];
       const result = indexer._extractTextContent(content);
 
       expect(result).toContain('First paragraph');
       expect(result).toContain('Second paragraph');
-      expect(result).not.toContain('tool_use');
+    });
+
+    it('flattens tool_use blocks with a [TOOL:<name>] prefix so the input is searchable', () => {
+      const content = [
+        { type: 'text', text: 'Running a command' },
+        { type: 'tool_use', name: 'Bash', input: { command: 'echo cat-finder-token-12345' } },
+      ];
+      const result = indexer._extractTextContent(content);
+
+      expect(result).toContain('Running a command');
+      expect(result).toContain('[TOOL:Bash]');
+      expect(result).toContain('cat-finder-token-12345');
+    });
+
+    it('flattens tool_result blocks with a [TOOL_RESULT] prefix', () => {
+      const content = [
+        { type: 'tool_result', tool_use_id: 'abc', content: 'README.md\npackage.json\nUNIQUE_FILENAME_XYZ.txt' },
+      ];
+      const result = indexer._extractTextContent(content);
+
+      expect(result).toContain('[TOOL_RESULT]');
+      expect(result).toContain('UNIQUE_FILENAME_XYZ.txt');
+    });
+
+    it('extracts text from tool_result whose content is an array of text/image blocks', () => {
+      const content = [
+        {
+          type: 'tool_result',
+          tool_use_id: 'abc',
+          content: [
+            { type: 'text', text: 'first chunk of stdout' },
+            { type: 'image', source: { type: 'base64', data: 'ignored-bytes' } },
+            { type: 'text', text: 'second chunk of stdout' },
+          ],
+        },
+      ];
+      const result = indexer._extractTextContent(content);
+
+      expect(result).toContain('first chunk of stdout');
+      expect(result).toContain('second chunk of stdout');
+      expect(result).toContain('[image]');
+      expect(result).not.toContain('ignored-bytes');
+    });
+
+    it('caps the per-block tool content at 2000 chars so one huge call cant dominate the index', () => {
+      const huge = 'X'.repeat(5000);
+      const content = [
+        { type: 'tool_result', tool_use_id: 'abc', content: huge },
+      ];
+      const result = indexer._extractTextContent(content);
+      // [TOOL_RESULT] prefix plus a space, plus up to 2000 X's.
+      expect(result.length).toBeLessThanOrEqual('[TOOL_RESULT] '.length + 2000);
     });
 
     it('extracts text from single text block object', () => {

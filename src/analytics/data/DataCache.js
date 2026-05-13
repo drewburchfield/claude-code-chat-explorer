@@ -40,7 +40,11 @@ class DataCache {
       computationTTL: 20000, // 20 seconds for expensive computations
       metadataTTL: 10000, // 10 seconds for metadata
       processTTL: 1000, // 1 second for process data
-      maxCacheSize: 50, // Increased to reduce evictions
+      // Capacity per per-file cache. 500 is well below the per-entry
+      // RSS budget on a typical install and well above the ~100
+      // conversations a heavy user actually re-reads in a session, so
+      // eviction is rare in practice and harmless when it fires.
+      maxCacheSize: 500,
     };
     
     // Dependency tracking for smart invalidation
@@ -77,23 +81,26 @@ class DataCache {
       // Check if cached content is still valid
       if (cached && cached.timestamp >= stats.mtime.getTime()) {
         this.metrics.hits++;
+        cached.lastAccessed = Date.now();
         return cached.content;
       }
-      
+
       // Cache miss - read file
       this.metrics.misses++;
       const content = await fs.readFile(filepath, 'utf8');
-      
+
       this.caches.fileContent.set(filepath, {
         content,
         timestamp: stats.mtime.getTime(),
+        lastAccessed: Date.now(),
         stats: stats
       });
-      
+
       // Also cache the file stats
       this.caches.fileStats.set(filepath, {
         stats: stats,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        lastAccessed: Date.now()
       });
       
       return content;
@@ -116,19 +123,21 @@ class DataCache {
     // Check if cached parsed data is still valid
     if (cached && cached.timestamp >= fileStats.mtime.getTime()) {
       this.metrics.hits++;
+      cached.lastAccessed = Date.now();
       return cached.messages;
     }
-    
+
     // Cache miss - parse conversation with tool correlation
     this.metrics.misses++;
     const content = await this.getFileContent(filepath);
     const lines = content.trim().split('\n').filter(line => line.trim());
-    
+
     const messages = this.parseAndCorrelateToolMessages(lines);
-    
+
     this.caches.parsedConversations.set(filepath, {
       messages,
-      timestamp: fileStats.mtime.getTime()
+      timestamp: fileStats.mtime.getTime(),
+      lastAccessed: Date.now()
     });
     
     return messages;
@@ -169,70 +178,60 @@ class DataCache {
       }
     }
     
-    // Second pass: correlate tool_result with tool_use (first process ALL tool_results)
+    // Second pass: correlate tool_result blocks with their tool_use parent
+    // and decide whether the carrier user message survives. If the user
+    // message contains only tool_result blocks it's dropped from the
+    // output (already represented under the assistant's toolResults). If it
+    // mixes tool_result with other content (text, image) we keep the
+    // message but strip the tool_result blocks so they don't render twice.
+    const droppedToolResultCarriers = new Set();
     for (const item of entries) {
-      if (item.type === 'user' && item.message.content) {
-        // Check if this is a tool_result entry
-        const toolResultBlock = Array.isArray(item.message.content)
-          ? item.message.content.find(c => c.type === 'tool_result')
-          : (item.message.content.type === 'tool_result' ? item.message.content : null);
-        
-        if (toolResultBlock && toolResultBlock.tool_use_id) {
-          // This is a tool_result - attach it to the corresponding tool_use
-          const toolUseEntry = toolUseMap.get(toolResultBlock.tool_use_id);
-          if (toolUseEntry) {
-            // Enhance tool result with additional metadata
-            const enhancedToolResult = {
-              ...toolResultBlock,
-              // Include additional metadata from toolUseResult if available
-              ...(item.toolUseResult && {
-                stdout: item.toolUseResult.stdout,
-                stderr: item.toolUseResult.stderr,
-                interrupted: item.toolUseResult.interrupted,
-                isImage: item.toolUseResult.isImage,
-                returnCodeInterpretation: item.toolUseResult.returnCodeInterpretation
-              })
-            };
-            
-            // Attach tool result to the tool use entry
-            if (!toolUseEntry.toolResults) {
-              toolUseEntry.toolResults = [];
-            }
-            toolUseEntry.toolResults.push(enhancedToolResult);
-            // console.log: Tool result attached successfully
-          }
-        }
+      if (item.type !== 'user' || !item.message.content) continue;
+
+      const contentArray = Array.isArray(item.message.content)
+        ? item.message.content
+        : [item.message.content];
+
+      const toolResultBlocks = contentArray.filter(c => c && c.type === 'tool_result');
+      if (toolResultBlocks.length === 0) continue;
+
+      let correlatedAny = false;
+      for (const block of toolResultBlocks) {
+        if (!block.tool_use_id) continue;
+        const toolUseEntry = toolUseMap.get(block.tool_use_id);
+        if (!toolUseEntry) continue;
+        const enhancedToolResult = {
+          ...block,
+          ...(item.toolUseResult && {
+            stdout: item.toolUseResult.stdout,
+            stderr: item.toolUseResult.stderr,
+            interrupted: item.toolUseResult.interrupted,
+            isImage: item.toolUseResult.isImage,
+            returnCodeInterpretation: item.toolUseResult.returnCodeInterpretation,
+          }),
+        };
+        if (!toolUseEntry.toolResults) toolUseEntry.toolResults = [];
+        toolUseEntry.toolResults.push(enhancedToolResult);
+        correlatedAny = true;
+      }
+      if (!correlatedAny) continue;
+
+      const nonToolResult = contentArray.filter(c => c && c.type !== 'tool_result');
+      if (nonToolResult.length === 0) {
+        droppedToolResultCarriers.add(item);
+      } else {
+        // Keep the user message but with only the non-tool-result content,
+        // so an attached image or text doesn't disappear with the
+        // correlated result.
+        item.message = { ...item.message, content: nonToolResult };
       }
     }
-    
-    // Third pass: process messages and filter out standalone tool_result entries
+
+    // Third pass: emit messages, dropping pure tool_result carriers.
     const processedMessages = [];
-    
+
     for (const item of entries) {
-      if (item.type === 'user' && item.message.content) {
-        // Check if this is a tool_result entry (skip it as we've already processed it)
-        const toolResultBlock = Array.isArray(item.message.content)
-          ? item.message.content.find(c => c.type === 'tool_result')
-          : (item.message.content.type === 'tool_result' ? item.message.content : null);
-        
-        if (toolResultBlock && toolResultBlock.tool_use_id) {
-          // Skip standalone tool_result entries - they've been attached to their tool_use
-          continue;
-        }
-      }
-      
-      // Convert to our standard format
-      if (item.toolResults) {
-        // console.log: Processing item with tool results
-      }
-      
-      // Debug specific item we're looking for
-      if (item.message && item.message.content && Array.isArray(item.message.content)) {
-        const toolUseBlock = item.message.content.find(c => c.type === 'tool_use' && c.id === 'toolu_01D8RMQYDySWAscQCC6pfDWf');
-        if (toolUseBlock) {
-          // Debug: Processing tool_use item
-        }
-      }
+      if (droppedToolResultCarriers.has(item)) continue;
       const parsed = {
         id: item.message.id || item.uuid || null,
         role: item.message.role || (item.type === 'assistant' ? 'assistant' : 'user'),
@@ -266,18 +265,20 @@ class DataCache {
     // Check if metadata cache is still valid
     if (cached && (Date.now() - cached.timestamp) < this.config.metadataTTL) {
       this.metrics.hits++;
+      cached.lastAccessed = Date.now();
       return cached.stats;
     }
-    
+
     // Cache miss - get fresh stats
     this.metrics.misses++;
     const stats = await fs.stat(filepath);
-    
+
     this.caches.fileStats.set(filepath, {
       stats: stats,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      lastAccessed: Date.now()
     });
-    
+
     return stats;
   }
 
@@ -359,17 +360,19 @@ class DataCache {
     
     if (cached && cached.timestamp >= fileStats.mtime.getTime()) {
       this.metrics.hits++;
+      cached.lastAccessed = Date.now();
       return cached.usage;
     }
-    
+
     this.metrics.misses++;
     const usage = await calculateFn();
-    
+
     this.caches.tokenUsage.set(filepath, {
       usage,
-      timestamp: fileStats.mtime.getTime()
+      timestamp: fileStats.mtime.getTime(),
+      lastAccessed: Date.now()
     });
-    
+
     return usage;
   }
 
@@ -385,17 +388,19 @@ class DataCache {
     
     if (cached && cached.timestamp >= fileStats.mtime.getTime()) {
       this.metrics.hits++;
+      cached.lastAccessed = Date.now();
       return cached.info;
     }
-    
+
     this.metrics.misses++;
     const info = await extractFn();
-    
+
     this.caches.modelInfo.set(filepath, {
       info,
-      timestamp: fileStats.mtime.getTime()
+      timestamp: fileStats.mtime.getTime(),
+      lastAccessed: Date.now()
     });
-    
+
     return info;
   }
 
@@ -411,17 +416,19 @@ class DataCache {
     
     if (cached && cached.timestamp >= fileStats.mtime.getTime()) {
       this.metrics.hits++;
+      cached.lastAccessed = Date.now();
       return cached.squares;
     }
-    
+
     this.metrics.misses++;
     const squares = await generateFn();
-    
+
     this.caches.statusSquares.set(filepath, {
       squares,
-      timestamp: fileStats.mtime.getTime()
+      timestamp: fileStats.mtime.getTime(),
+      lastAccessed: Date.now()
     });
-    
+
     return squares;
   }
 
@@ -437,17 +444,19 @@ class DataCache {
     
     if (cached && cached.timestamp >= fileStats.mtime.getTime()) {
       this.metrics.hits++;
+      cached.lastAccessed = Date.now();
       return cached.usage;
     }
-    
+
     this.metrics.misses++;
     const usage = await extractFn();
-    
+
     this.caches.toolUsage.set(filepath, {
       usage,
-      timestamp: fileStats.mtime.getTime()
+      timestamp: fileStats.mtime.getTime(),
+      lastAccessed: Date.now()
     });
-    
+
     return usage;
   }
 
@@ -497,9 +506,9 @@ class DataCache {
    */
   invalidateComputations() {
     ['sessions', 'summary'].forEach(key => {
-      this.caches[key] = { 
-        data: null, 
-        timestamp: 0, 
+      this.caches[key] = {
+        data: null,
+        timestamp: 0,
         dependencies: new Set(),
         dependencyTimestamps: new Map()
       };
@@ -508,27 +517,63 @@ class DataCache {
   }
 
   /**
+   * Drop every cached file entry and every cached computation, but
+   * preserve cumulative metrics. Used by the periodic fallback so that
+   * if the file watcher missed an event the next read pulls fresh data
+   * from disk instead of serving a stale cached parse.
+   */
+  invalidateAll() {
+    let fileEntriesCleared = 0;
+    for (const [name, cache] of Object.entries(this.caches)) {
+      if (cache instanceof Map) {
+        fileEntriesCleared += cache.size;
+        cache.clear();
+      } else {
+        this._resetSingletonCache(name, cache);
+      }
+    }
+    this.metrics.filesInvalidated += fileEntriesCleared;
+    this.metrics.invalidations += 1;
+    this.metrics.computationsInvalidated += 2;
+  }
+
+  /**
+   * Reset a non-Map cache slot in place, preserving any config fields the
+   * slot owns (e.g. `processes.ttl`). Only the data/timestamp/dependency
+   * fields a slot actually declares get touched.
+   * @private
+   */
+  _resetSingletonCache(_name, cache) {
+    cache.data = null;
+    cache.timestamp = 0;
+    if (Object.prototype.hasOwnProperty.call(cache, 'dependencies')) {
+      cache.dependencies = new Set();
+    }
+    if (Object.prototype.hasOwnProperty.call(cache, 'dependencyTimestamps')) {
+      cache.dependencyTimestamps = new Map();
+    }
+  }
+
+  /**
    * Clear all caches
    */
   clearAll() {
-    Object.values(this.caches).forEach(cache => {
+    for (const [name, cache] of Object.entries(this.caches)) {
       if (cache instanceof Map) {
         cache.clear();
       } else {
-        cache.data = null;
-        cache.timestamp = 0;
-        cache.dependencies = new Set();
-        cache.dependencyTimestamps = new Map();
+        this._resetSingletonCache(name, cache);
       }
-    });
-    
+    }
+
     // Reset metrics
     this.metrics = {
       hits: 0,
       misses: 0,
       invalidations: 0,
       filesInvalidated: 0,
-      computationsInvalidated: 0
+      computationsInvalidated: 0,
+      evictions: 0
     };
   }
 
@@ -590,11 +635,18 @@ class DataCache {
 
     for (const [, cache] of caches) {
       if (cache.size > maxSize) {
-        // Convert to array and sort by timestamp (oldest first)
+        // Evict by least-recently-accessed. Older code sorted by
+        // `timestamp`, which on the per-file caches is the source
+        // file's mtime - that turned eviction into "drop the entry
+        // for the oldest file on disk," which is the opposite of LRU
+        // when the user is actively re-reading an older file.
+        // `lastAccessed` is refreshed on every cache hit, so it
+        // reflects actual usage. Fall back to `timestamp` for any
+        // entry written before this field existed.
         const entries = Array.from(cache.entries()).sort((a, b) => {
-          const timestampA = a[1].timestamp || 0;
-          const timestampB = b[1].timestamp || 0;
-          return timestampA - timestampB;
+          const recencyA = a[1].lastAccessed || a[1].timestamp || 0;
+          const recencyB = b[1].lastAccessed || b[1].timestamp || 0;
+          return recencyA - recencyB;
         });
 
         // Remove oldest entries until we're under the limit

@@ -13,11 +13,21 @@ const AgentAnalyzer = require('./analytics/core/AgentAnalyzer');
 const WebSocketServer = require('./analytics/notifications/WebSocketServer');
 const SessionSharing = require('./session-sharing');
 const DatabaseBackend = require('./analytics/data/DatabaseBackend');
+const BoundedMap = require('./utils/BoundedMap');
+const { priceConversation } = require('./utils/ModelPricing');
+
+// Cap the per-conversation state Maps. With 200 entries we cover the
+// "user has 200 conversations open recently" window; older
+// conversations get re-snapshotted on next access at the cost of one
+// extra DB hit, which is preferable to growing the in-process Map for
+// the lifetime of the watcher.
+const CONVERSATION_STATE_CAP = 200;
 
 class ChatsMobile {
   constructor(options = {}) {
     this.app = express();
-    this.port = 9876; // Uncommon port for chats mobile
+    // options.port: explicit numeric port, or 0 for an ephemeral port (tests).
+    this.port = options.port !== undefined ? options.port : 9876;
     this.fileWatcher = new FileWatcher();
     this.stateCalculator = new StateCalculator();
     this.dataCache = new DataCache();
@@ -26,10 +36,10 @@ class ChatsMobile {
     this.webSocketServer = null;
     this.options = options;
     this.verbose = options.verbose || false;
-    
+
     // Initialize ConversationAnalyzer with proper parameters
-    const homeDir = os.homedir();
-    const claudeDir = path.join(homeDir, '.claude');
+    // options.claudeDir lets tests point at a temp directory instead of $HOME/.claude.
+    const claudeDir = options.claudeDir || path.join(os.homedir(), '.claude');
     this.claudeDir = claudeDir;
     this.conversationAnalyzer = new ConversationAnalyzer(claudeDir, this.dataCache);
 
@@ -49,11 +59,25 @@ class ChatsMobile {
       lastUpdate: new Date().toISOString()
     };
     
-    // Track message counts per conversation to detect new messages
-    this.conversationMessageCounts = new Map();
-    
-    // Track message snapshots to detect message updates (e.g., tool correlation)
-    this.conversationMessageSnapshots = new Map();
+    // Track message counts per conversation to detect new messages.
+    // BoundedMap because this otherwise grows once per conversation the
+    // user ever opened in the lifetime of the process.
+    this.conversationMessageCounts = new BoundedMap(CONVERSATION_STATE_CAP);
+
+    // Track message snapshots to detect message updates (e.g., tool
+    // correlation). Bounded for the same reason.
+    this.conversationMessageSnapshots = new BoundedMap(CONVERSATION_STATE_CAP);
+
+    // Lightweight, unbounded Set of every conversation id we have
+    // seeded a snapshot for in this process. When the BoundedMap
+    // evicts a conversation under cap pressure, the diff path needs
+    // to tell "genuinely new conversation" apart from "snapshot was
+    // evicted, re-snapshot silently" - otherwise an evicted entry
+    // would look like a count delta of `currentCount` new messages
+    // and we'd broadcast every message as fresh over the websocket.
+    // IDs are short strings; even at 100k conversations this is a
+    // few MB and would dwarf any per-entry savings from a cap here.
+    this.conversationIdsEverSeen = new Set();
   }
 
   /**
@@ -667,20 +691,35 @@ class ChatsMobile {
         const waitTimePercent = totalIterationTime > 0 ? Math.round((totalWaitTime / totalIterationTime) * 100) : 0;
         const userTimePercent = totalIterationTime > 0 ? Math.round((totalUserTime / totalIterationTime) * 100) : 0;
 
-        // Calculate cache efficiency
-        const cacheTotal = (conversation.tokenUsage?.cacheCreationTokens || 0) + (conversation.tokenUsage?.cacheReadTokens || 0);
+        // Re-attribute tokens from the parsed messages we already have
+        // in hand. The cached `conversation.tokenUsage` from the SQLite
+        // index only carries `{total, input, output}` for backwards
+        // compat; the per-tier cache buckets we need for accurate
+        // pricing live in the JSONL `usage` blocks. This call is cheap
+        // because `messages` is already loaded above.
+        const bucketUsage = this.conversationAnalyzer.calculateRealTokenUsage(messages);
+
+        const cacheTotal = (bucketUsage.cacheCreationTokens || 0) + (bucketUsage.cacheReadTokens || 0);
         const cacheEfficiency = cacheTotal > 0
-          ? Math.round((conversation.tokenUsage?.cacheReadTokens || 0) / cacheTotal * 100)
+          ? Math.round((bucketUsage.cacheReadTokens || 0) / cacheTotal * 100)
           : 0;
 
-        // Estimate cost (approximate Claude API pricing)
-        // Sonnet 4.5: $3/1M input, $15/1M output
-        // Cache write: $3.75/1M, Cache read: $0.30/1M
-        const inputCost = (conversation.tokenUsage?.inputTokens || 0) / 1000000 * 3;
-        const outputCost = (conversation.tokenUsage?.outputTokens || 0) / 1000000 * 15;
-        const cacheWriteCost = (conversation.tokenUsage?.cacheCreationTokens || 0) / 1000000 * 3.75;
-        const cacheReadCost = (conversation.tokenUsage?.cacheReadTokens || 0) / 1000000 * 0.30;
-        const totalCost = inputCost + outputCost + cacheWriteCost + cacheReadCost;
+        // Per-model pricing: previously this block hardcoded Sonnet
+        // 4.5 rates for every conversation, which over-counted Haiku
+        // runs and under-counted Opus runs by a wide margin.
+        // priceConversation() routes the token totals to the correct
+        // per-family rates and exposes an isUnknownModel flag so the
+        // UI can surface "we guessed" on out-of-table models.
+        const pricing = priceConversation({
+          tokenUsage: bucketUsage,
+          model: conversation.modelInfo?.primaryModel,
+        });
+        const inputCost = pricing.inputCost;
+        const outputCost = pricing.outputCost;
+        const cacheWriteCost = pricing.cacheWriteCost;
+        const cacheReadCost = pricing.cacheReadCost;
+        const totalCost = pricing.totalCost;
+        const isUnknownModel = pricing.isUnknownModel;
 
         // Detect agents, hooks, and components used
         const agentAnalyzer = new AgentAnalyzer();
@@ -782,13 +821,20 @@ class ChatsMobile {
           toolCalls: conversation.toolUsage?.totalToolCalls || 0,
           cacheEfficiency: `${cacheEfficiency}%`,
 
-          // Token breakdown
+          // Token breakdown. Source these from the freshly-attributed
+          // bucketUsage rather than the cached conversation record,
+          // which only carries the rolled-up totals.
           tokenUsage: {
-            inputTokens: conversation.tokenUsage?.inputTokens || 0,
-            outputTokens: conversation.tokenUsage?.outputTokens || 0,
-            cacheCreationTokens: conversation.tokenUsage?.cacheCreationTokens || 0,
-            cacheReadTokens: conversation.tokenUsage?.cacheReadTokens || 0,
-            total: conversation.tokenUsage?.total || 0
+            inputTokens: bucketUsage.inputTokens || 0,
+            outputTokens: bucketUsage.outputTokens || 0,
+            cacheCreationTokens: bucketUsage.cacheCreationTokens || 0,
+            cacheCreation5mTokens: bucketUsage.cacheCreation5mTokens || 0,
+            cacheCreation1hTokens: bucketUsage.cacheCreation1hTokens || 0,
+            cacheReadTokens: bucketUsage.cacheReadTokens || 0,
+            total: bucketUsage.total
+              || (bucketUsage.inputTokens || 0) + (bucketUsage.outputTokens || 0)
+              || conversation.tokenUsage?.total
+              || 0
           },
 
           // Cost estimate
@@ -799,7 +845,12 @@ class ChatsMobile {
               output: outputCost.toFixed(4),
               cacheWrite: cacheWriteCost.toFixed(4),
               cacheRead: cacheReadCost.toFixed(4)
-            }
+            },
+            // True when the conversation's model id didn't match a
+            // known family (Opus/Sonnet/Haiku). Sonnet rates were
+            // applied as a neutral fallback; the UI surfaces this
+            // so the user knows the number is best-effort.
+            isUnknownModel
           },
 
           // Model info with usage percentages
@@ -914,21 +965,91 @@ class ChatsMobile {
    */
   async setupFileWatching() {
     try {
-      const homeDir = os.homedir();
-      const claudeDir = path.join(homeDir, '.claude');
-      
+      const claudeDir = this.claudeDir;
+
       this.fileWatcher.setupFileWatchers(
         claudeDir,
         this.handleDataRefresh.bind(this),
         () => {}, // processRefreshCallback (not needed for mobile)
         this.dataCache,
-        this.handleConversationChange.bind(this)
+        this.handleConversationChange.bind(this),
+        this.handleFileChange.bind(this),
+        this.handleFullReindex.bind(this)
       );
-      
+
       this.log('info', chalk.green('👀 File watching setup successful'));
+      this.fileWatchingFailed = false;
     } catch (error) {
-      this.log('warn', chalk.yellow('⚠️  File watching setup failed:', error.message));
+      // A failed watcher setup means newly written chats never reach the
+      // index, so this is operationally fatal — surface it loudly rather
+      // than warn-and-continue.
+      this.fileWatchingFailed = true;
+      this.log('error', chalk.red(`File watching setup failed: ${error.message}`));
+      if (error.stack) console.error(error.stack);
     }
+  }
+
+  /**
+   * Persist a single file's contents to the database, then refresh the
+   * in-memory view. This is the only path on the watcher side that mutates
+   * the persistent store; the periodic fallback uses handleFullReindex.
+   *
+   * @param {string} filePath - Absolute path to the changed .jsonl file
+   */
+  async handleFileChange(filePath) {
+    // Coalesce concurrent runs against the same file so a burst of chokidar
+    // events doesn't queue redundant indexer work.
+    if (!this._fileIndexInFlight) this._fileIndexInFlight = new Map();
+    const existing = this._fileIndexInFlight.get(filePath);
+    if (existing) return existing;
+
+    const work = (async () => {
+      try {
+        if (this.useDatabaseBackend && this.databaseBackend?.isInitialized) {
+          await this.databaseBackend.indexFile(filePath);
+        }
+      } catch (error) {
+        // Re-throw so the watcher's catch increments dataRefreshErrors and
+        // /api/metrics reflects the failure rather than reporting zero
+        // errors while the DB is silently stale.
+        console.error(
+          chalk.red(`[indexFile] Failed for ${filePath}: ${error?.message || error}`)
+        );
+        if (error?.stack) console.error(error.stack);
+        throw error;
+      } finally {
+        this._fileIndexInFlight.delete(filePath);
+      }
+      await this.handleDataRefresh();
+    })();
+    this._fileIndexInFlight.set(filePath, work);
+    return work;
+  }
+
+  /**
+   * Full re-index entry point used by the periodic fallback. Cheap on the
+   * incremental path (Indexer skips files whose mtime+size haven't changed).
+   * Coalesced so an overlapping interval can't fan out concurrent runIndex
+   * calls against the same SQLite database.
+   */
+  async handleFullReindex() {
+    if (this._reindexInFlight) return this._reindexInFlight;
+    this._reindexInFlight = (async () => {
+      try {
+        if (this.useDatabaseBackend && this.databaseBackend?.isInitialized) {
+          await this.databaseBackend.runIndex();
+        }
+      } catch (error) {
+        console.error(
+          chalk.red(`[fullReindex] runIndex failed: ${error?.message || error}`)
+        );
+        if (error?.stack) console.error(error.stack);
+        throw error;
+      } finally {
+        this._reindexInFlight = null;
+      }
+    })();
+    return this._reindexInFlight;
   }
 
   /**
@@ -938,7 +1059,7 @@ class ChatsMobile {
     if (this.refreshTimeout) {
       clearTimeout(this.refreshTimeout);
     }
-    
+
     this.refreshTimeout = setTimeout(async () => {
       try {
         await this.loadInitialData();
@@ -982,18 +1103,40 @@ class ChatsMobile {
       const parsedMessages = await this.conversationAnalyzer.getParsedConversation(conversation.filePath);
       
       if (parsedMessages && parsedMessages.length > 0) {
-        // Get the previous message count and snapshots for this conversation
-        const previousCount = this.conversationMessageCounts.get(conversationId) || 0;
+        // Distinguish three states:
+        //   1. fresh conversation (never seen): broadcast everything
+        //   2. cached snapshot present: diff against it normally
+        //   3. previously seen but evicted from the BoundedMap: this
+        //      is the cap-pressure case; re-seed silently and skip
+        //      the broadcast so we don't fake-publish the full
+        //      transcript on every cap-evicted conversation's first
+        //      change event.
         const currentCount = parsedMessages.length;
+        const currentSnapshots = parsedMessages.map(msg => this.generateMessageSnapshot(msg));
+        const everSeenBefore = this.conversationIdsEverSeen.has(conversationId);
+        const hasCachedSnapshot = this.conversationMessageCounts.has(conversationId);
+        const wasEvictedFromCache = everSeenBefore && !hasCachedSnapshot;
+
+        if (wasEvictedFromCache) {
+          // Silently rebuild the snapshot for this evicted entry.
+          // Any actual delta will be picked up on the *next* change
+          // event, when the snapshot is back in the BoundedMap.
+          this.conversationMessageCounts.set(conversationId, currentCount);
+          this.conversationMessageSnapshots.set(conversationId, currentSnapshots);
+          this.conversationIdsEverSeen.add(conversationId);
+          return;
+        }
+
+        const previousCount = this.conversationMessageCounts.get(conversationId) || 0;
         const previousSnapshots = this.conversationMessageSnapshots.get(conversationId) || [];
-        
+
         // Update the count
         this.conversationMessageCounts.set(conversationId, currentCount);
-        
-        // Generate current snapshots
-        const currentSnapshots = parsedMessages.map(msg => this.generateMessageSnapshot(msg));
+
+        // Persist the new snapshots and mark as seen.
         this.conversationMessageSnapshots.set(conversationId, currentSnapshots);
-        
+        this.conversationIdsEverSeen.add(conversationId);
+
         // Find new messages (by count increase)
         const newMessages = currentCount > previousCount ? parsedMessages.slice(previousCount) : [];
         
@@ -1187,12 +1330,16 @@ class ChatsMobile {
           console.log(chalk.cyan('📦 Loading conversations from SQLite database...'));
           conversations = this.databaseBackend.getConversations({ limit: 10000 });
 
-          // Initialize message counts from database (already indexed)
+          // Initialize message counts from database (already indexed).
+          // We mark every conversation as "ever seen" so the diff path
+          // can distinguish "evicted from the BoundedMap under cap
+          // pressure" from "genuinely new conversation."
           for (const conversation of conversations) {
             this.conversationMessageCounts.set(conversation.id, conversation.messageCount);
             // Skip snapshot initialization in database mode - too expensive
             // Snapshots will be loaded on-demand when viewing a conversation
             this.conversationMessageSnapshots.set(conversation.id, []);
+            this.conversationIdsEverSeen.add(conversation.id);
           }
         } else {
           // Fallback to original file-based loading
@@ -1208,10 +1355,12 @@ class ChatsMobile {
               // Initialize snapshots for change detection
               const snapshots = parsedMessages.map(msg => this.generateMessageSnapshot(msg));
               this.conversationMessageSnapshots.set(conversation.id, snapshots);
+              this.conversationIdsEverSeen.add(conversation.id);
             } catch (error) {
               // If we can't parse the conversation, set count to 0 and empty snapshots
               this.conversationMessageCounts.set(conversation.id, 0);
               this.conversationMessageSnapshots.set(conversation.id, []);
+              this.conversationIdsEverSeen.add(conversation.id);
             }
           }
         }
@@ -1221,7 +1370,17 @@ class ChatsMobile {
         this.data.lastUpdate = new Date().toISOString();
 
         console.log(chalk.green(`📂 Loaded ${this.data.conversations.length} conversations`));
-        console.log(chalk.gray(`📊 Initialized message counts for ${this.conversationMessageCounts.size} conversations`));
+        // Log both: the BoundedMap holds the working set of recent
+        // diff snapshots (capped); the ever-seen Set tracks the full
+        // population so the watcher diff path can tell evicted apart
+        // from genuinely-new.
+        const total = this.conversationIdsEverSeen.size;
+        const cached = this.conversationMessageCounts.size;
+        if (total > cached) {
+          console.log(chalk.gray(`📊 Tracking ${total} conversations (snapshot cache: ${cached}/${CONVERSATION_STATE_CAP})`));
+        } else {
+          console.log(chalk.gray(`📊 Initialized message counts for ${total} conversations`));
+        }
 
         // Log database stats if using database backend
         if (this.useDatabaseBackend && this.databaseBackend.isInitialized) {
@@ -1250,6 +1409,11 @@ class ChatsMobile {
   async startServer() {
     return new Promise(async (resolve) => {
       this.httpServer = this.app.listen(this.port, async () => {
+        // If port was 0 (ephemeral, used by tests), record the actual port the OS assigned.
+        const address = this.httpServer.address();
+        if (address && typeof address === 'object') {
+          this.port = address.port;
+        }
         this.localUrl = `http://localhost:${this.port}`;
         console.log(chalk.green(`📱 Chats Mobile server started at ${this.localUrl}`));
         

@@ -1,30 +1,33 @@
+# Parallel "dev" container for testing in-progress work without disturbing
+# the user's production instance on port 9876. Build, run, and tear down
+# with:
+#
+#   docker compose -f docker-compose.dev.yml -p chat-explorer-dev up -d --build
+#   docker compose -f docker-compose.dev.yml -p chat-explorer-dev logs -f
+#   docker compose -f docker-compose.dev.yml -p chat-explorer-dev down -v
+
 services:
-  chat-explorer:
+  chat-explorer-dev:
     build:
       context: .
       args:
         USER_ID: 501
-    container_name: claude-code-chat-explorer
+    container_name: claude-code-chat-explorer-dev
     restart: unless-stopped
     ports:
-      - "127.0.0.1:9876:9876"  # Localhost only
+      - "127.0.0.1:9877:9876"
     volumes:
-      # Mount at SAME absolute path so symlinks resolve correctly
       - ${HOME}/.claude:${HOME}/.claude:ro
-      # Writable volume for SQLite database
-      - chat-explorer-db:/data
+      - chat-explorer-dev-db:/data
     environment:
       - NODE_ENV=production
       - NODE_OPTIONS=--max-old-space-size=1024
       - HOME=${HOME}
       - CLAUDE_HOME=${HOME}/.claude
       - CLAUDE_DB_PATH=/data/conversations.db
-      # Polling is the only chokidar mode that reliably sees host file
-      # events through Docker Desktop's VirtioFS bridge on macOS/Windows.
       - CHOKIDAR_USEPOLLING=1
       - CHOKIDAR_INTERVAL=2000
 
-    # Security hardening
     cap_drop:
       - ALL
     security_opt:
@@ -41,16 +44,5 @@ services:
         reservations:
           memory: 256M
 
-  # chat-explorer-test:
-  #   build:
-  #     context: .
-  #     target: test
-  #   profiles:
-  #     - test
-  #   environment:
-  #     - NODE_ENV=test
-  #   # Tests should not depend on your real ~/.claude data or the prod DB volume
-  #   volumes: []
-
 volumes:
-  chat-explorer-db:
+  chat-explorer-dev-db:

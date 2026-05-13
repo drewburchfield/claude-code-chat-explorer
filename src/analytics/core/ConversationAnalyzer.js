@@ -273,25 +273,42 @@ class ConversationAnalyzer {
       }
     }
 
-    // Second pass: attach tool_results to their corresponding tool_use entries
+    // Second pass: attach tool_results to their corresponding tool_use entries.
+    // A user message can mix tool_result blocks with other content (text,
+    // image). If the message contains *only* tool_result blocks we drop it
+    // after correlation; if it carries other content too, we keep the
+    // message and strip just the tool_result blocks so the surrounding
+    // text/image isn't lost.
     for (const item of entries) {
-      if (item.type === 'user' && item.message.content) {
-        const toolResultBlock = Array.isArray(item.message.content)
-          ? item.message.content.find(c => c.type === 'tool_result')
-          : (item.message.content.type === 'tool_result' ? item.message.content : null);
+      if (item.type !== 'user' || !item.message.content) continue;
 
-        if (toolResultBlock && toolResultBlock.tool_use_id) {
-          const toolUseEntry = toolUseMap.get(toolResultBlock.tool_use_id);
-          if (toolUseEntry) {
-            // Attach tool result to the tool use entry
-            if (!toolUseEntry.toolResults) {
-              toolUseEntry.toolResults = [];
-            }
-            toolUseEntry.toolResults.push(toolResultBlock);
-            // Mark this entry to be skipped in the output
-            toolResultIds.add(item);
-          }
-        }
+      const contentArray = Array.isArray(item.message.content)
+        ? item.message.content
+        : [item.message.content];
+
+      const toolResultBlocks = contentArray.filter(c => c && c.type === 'tool_result');
+      if (toolResultBlocks.length === 0) continue;
+
+      let correlatedAny = false;
+      for (const block of toolResultBlocks) {
+        if (!block.tool_use_id) continue;
+        const toolUseEntry = toolUseMap.get(block.tool_use_id);
+        if (!toolUseEntry) continue;
+        if (!toolUseEntry.toolResults) toolUseEntry.toolResults = [];
+        toolUseEntry.toolResults.push(block);
+        correlatedAny = true;
+      }
+      if (!correlatedAny) continue;
+
+      const nonToolResult = contentArray.filter(c => c && c.type !== 'tool_result');
+      if (nonToolResult.length === 0) {
+        // Pure tool_result message — drop it from the output entirely.
+        toolResultIds.add(item);
+      } else {
+        // Mixed content — keep the user message visible, but only with the
+        // non-tool-result blocks so the correlated results don't render
+        // twice.
+        item.message = { ...item.message, content: nonToolResult };
       }
     }
 
@@ -392,6 +409,8 @@ class ConversationAnalyzer {
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let totalCacheCreationTokens = 0;
+    let totalCacheCreation5m = 0;
+    let totalCacheCreation1h = 0;
     let totalCacheReadTokens = 0;
     let messagesWithUsage = 0;
 
@@ -400,6 +419,13 @@ class ConversationAnalyzer {
         totalInputTokens += message.usage.input_tokens || 0;
         totalOutputTokens += message.usage.output_tokens || 0;
         totalCacheCreationTokens += message.usage.cache_creation_input_tokens || 0;
+        // The API also exposes a per-tier split under
+        // usage.cache_creation when the caller requested 1h-cached
+        // prompt blocks; older transcripts predate this sub-object.
+        if (message.usage.cache_creation && typeof message.usage.cache_creation === 'object') {
+          totalCacheCreation5m += message.usage.cache_creation.ephemeral_5m_input_tokens || 0;
+          totalCacheCreation1h += message.usage.cache_creation.ephemeral_1h_input_tokens || 0;
+        }
         totalCacheReadTokens += message.usage.cache_read_input_tokens || 0;
         messagesWithUsage++;
       }
@@ -410,6 +436,8 @@ class ConversationAnalyzer {
       inputTokens: totalInputTokens,
       outputTokens: totalOutputTokens,
       cacheCreationTokens: totalCacheCreationTokens,
+      cacheCreation5mTokens: totalCacheCreation5m,
+      cacheCreation1hTokens: totalCacheCreation1h,
       cacheReadTokens: totalCacheReadTokens,
       messagesWithUsage: messagesWithUsage,
       totalMessages: parsedMessages.length,

@@ -310,7 +310,22 @@ class Indexer {
   }
 
   /**
-   * Extract text content from message content (handles various formats)
+   * Extract searchable text from a message content payload.
+   *
+   * Pulls in three kinds of block:
+   *   - `text` blocks verbatim
+   *   - `tool_use` blocks as `[TOOL:<name>] <stringified-input>`, so a
+   *     search for a Bash command line or a file path passed to Read
+   *     hits the session that ran it
+   *   - `tool_result` blocks as `[TOOL_RESULT] <text>`, so a search
+   *     for grep output or a unique token in stdout hits the session
+   *
+   * The marker tags also let search snippets disambiguate matches at
+   * the consumer end without us shipping a separate columns-per-kind
+   * schema (FTS5 virtual tables can't be ALTERed in place, so the
+   * unified-content approach lets us evolve coverage without churning
+   * the migration story every release).
+   *
    * @private
    */
   _extractTextContent(content) {
@@ -320,18 +335,65 @@ class Indexer {
       return content;
     }
 
-    if (Array.isArray(content)) {
-      return content
-        .filter(block => block.type === 'text')
-        .map(block => block.text || '')
-        .join('\n');
+    const blocks = Array.isArray(content) ? content : [content];
+    const parts = [];
+
+    for (const block of blocks) {
+      if (!block || typeof block !== 'object') continue;
+
+      if (block.type === 'text' && block.text) {
+        parts.push(block.text);
+      } else if (block.type === 'tool_use') {
+        const name = block.name || 'unknown';
+        // Truncate the per-block input JSON so a single huge tool
+        // call can't dominate the 100K-char session-level cap and
+        // crowd out the surrounding conversation text. 2K is enough
+        // for any realistic Bash command, file path, or grep query.
+        const inputText = this._stringifyToolPayload(block.input).slice(0, 2000);
+        parts.push(`[TOOL:${name}] ${inputText}`);
+      } else if (block.type === 'tool_result') {
+        const resultText = this._stringifyToolPayload(block.content).slice(0, 2000);
+        parts.push(`[TOOL_RESULT] ${resultText}`);
+      }
     }
 
-    if (content.type === 'text') {
-      return content.text || '';
+    return parts.join('\n');
+  }
+
+  /**
+   * Flatten a tool input/result payload (object, array of blocks, or
+   * primitive) to a single search-friendly string. Tool results in
+   * particular can be either a plain string or an array of `text` and
+   * `image` content blocks; we keep the text and skip the image bytes.
+   * @private
+   */
+  _stringifyToolPayload(payload) {
+    if (payload == null) return '';
+    if (typeof payload === 'string') return payload;
+
+    if (Array.isArray(payload)) {
+      const lines = [];
+      for (const item of payload) {
+        if (typeof item === 'string') {
+          lines.push(item);
+        } else if (item && typeof item === 'object') {
+          if (item.type === 'text' && item.text) lines.push(item.text);
+          else if (item.type === 'image') lines.push('[image]');
+          else lines.push(this._stringifyToolPayload(item));
+        }
+      }
+      return lines.join('\n');
     }
 
-    return '';
+    if (typeof payload === 'object') {
+      try {
+        return JSON.stringify(payload);
+      } catch (err) {
+        return '';
+      }
+    }
+
+    return String(payload);
   }
 
   /**
