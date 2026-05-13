@@ -2,9 +2,13 @@ name: Tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    # `branches:` here filters on the PR's BASE branch. Without `dev` listed,
+    # feature → dev PRs never trigger CI (only the later dev → main PR does).
+    # That meant feature work could merge to dev without tests running.
+    branches: [main, dev]
+  workflow_dispatch:
 
 # Default permissions for every job. Codecov upload only needs read; widen at
 # the job level (not workflow level) if a future job needs more.
