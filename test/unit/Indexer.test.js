@@ -153,6 +153,53 @@ describe('Indexer', () => {
     });
   });
 
+  describe('_parseJsonlStreaming() recall parity', () => {
+    async function writeJsonl(lines) {
+      const p = path.join(projectsDir, `recall-${Date.now()}-${Math.random().toString(36).slice(2)}.jsonl`);
+      await fs.writeFile(p, lines.map(l => JSON.stringify(l)).join('\n'));
+      return p;
+    }
+
+    it('indexes system entry content (string content, no message wrapper)', async () => {
+      const p = await writeJsonl([
+        { type: 'user', message: { role: 'user', content: 'hi' }, cwd: '/x' },
+        { type: 'system', subtype: 'reminder', content: 'reminder mentions SYS_UNIQUE_TOKEN here' },
+      ]);
+      const result = await indexer._parseJsonlStreaming(p);
+      expect(result.searchableContent).toContain('SYS_UNIQUE_TOKEN');
+    });
+
+    it('indexes compaction summary text', async () => {
+      const p = await writeJsonl([
+        { type: 'summary', summary: 'prior context about SUM_UNIQUE_TOKEN', leafUuid: 'abc' },
+        { type: 'user', message: { role: 'user', content: 'continue' }, cwd: '/x' },
+      ]);
+      const result = await indexer._parseJsonlStreaming(p);
+      expect(result.searchableContent).toContain('SUM_UNIQUE_TOKEN');
+    });
+
+    it('does not cap a single message at 2000 chars', async () => {
+      const big = 'm'.repeat(8000) + ' MSG_TAIL_TOKEN';
+      const p = await writeJsonl([
+        { type: 'user', message: { role: 'user', content: big }, cwd: '/x' },
+      ]);
+      const result = await indexer._parseJsonlStreaming(p);
+      expect(result.searchableContent).toContain('MSG_TAIL_TOKEN');
+    });
+
+    it('does not cap total conversation content at 100k', async () => {
+      const lines = [];
+      for (let i = 0; i < 60; i++) {
+        lines.push({ type: 'user', message: { role: 'user', content: 'z'.repeat(2000) } });
+      }
+      lines.push({ type: 'assistant', message: { role: 'assistant', content: 'FAR_TAIL_TOKEN' } });
+      const p = await writeJsonl(lines);
+      const result = await indexer._parseJsonlStreaming(p);
+      expect(result.searchableContent.length).toBeGreaterThan(100000);
+      expect(result.searchableContent).toContain('FAR_TAIL_TOKEN');
+    });
+  });
+
   describe('_extractTextContent()', () => {
     it('extracts text from string content', () => {
       const content = 'Simple string content';

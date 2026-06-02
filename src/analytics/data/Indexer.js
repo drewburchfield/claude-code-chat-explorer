@@ -243,11 +243,12 @@ class Indexer {
           if (item.message && (item.type === 'assistant' || item.type === 'user')) {
             result.messageCount++;
 
-            // Extract searchable content
+            // Extract searchable content. No per-message cap: search must
+            // match the on-disk text. The only bound is the 256KB-per-block
+            // safety ceiling inside _extractTextContent.
             const content = this._extractTextContent(item.message.content);
             if (content) {
-              // Limit content per message to prevent huge FTS entries
-              contentParts.push(content.slice(0, 2000));
+              contentParts.push(content);
             }
 
             // Track token usage from assistant messages
@@ -271,6 +272,15 @@ class Indexer {
                 result.toolUsage.total++;
               }
             }
+          } else if (item.type === 'system' && typeof item.content === 'string') {
+            // System reminders and hook output (top-level string content, no
+            // message wrapper) often quote settings, file paths, and tokens
+            // that grep finds on disk. Index them so search matches; they are
+            // not counted as messages.
+            contentParts.push(`[SYSTEM] ${item.content}`);
+          } else if (item.type === 'summary' && typeof item.summary === 'string') {
+            // Compaction summary entries that prefix resumed sessions.
+            contentParts.push(`[SUMMARY] ${item.summary}`);
           }
         } catch (parseErr) {
           // Log parse errors with context (limit to avoid spam)
@@ -297,8 +307,9 @@ class Indexer {
         }
         result.modelInfo.models = modelCounts;
 
-        // Join searchable content (limit total size)
-        result.searchableContent = contentParts.join('\n').slice(0, 100000);
+        // Join searchable content. No total-size cap: the index mirrors the
+        // on-disk text. Per-block 256KB ceiling still guards pathological blobs.
+        result.searchableContent = contentParts.join('\n');
 
         resolve(result);
       });
