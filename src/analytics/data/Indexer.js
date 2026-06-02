@@ -281,6 +281,15 @@ class Indexer {
           } else if (item.type === 'summary' && typeof item.summary === 'string') {
             // Compaction summary entries that prefix resumed sessions.
             contentParts.push(`[SUMMARY] ${item.summary}`);
+          } else if (item.type === 'queue-operation' && typeof item.content === 'string') {
+            // Queued user messages (top-level string content) are genuine
+            // user-authored text that should be searchable.
+            contentParts.push(`[QUEUED] ${item.content}`);
+          } else if (item.type === 'attachment' && item.attachment) {
+            // Pasted/attached payloads (e.g. file diffs, edited text) carry
+            // real content the user pasted in. Index the payload text.
+            const attachText = this._stringifyToolPayload(item.attachment).slice(0, BLOCK_CHAR_CAP);
+            if (attachText) contentParts.push(`[ATTACHMENT] ${attachText}`);
           }
         } catch (parseErr) {
           // Log parse errors with context (limit to avoid spam)

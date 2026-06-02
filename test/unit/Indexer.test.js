@@ -169,6 +169,24 @@ describe('Indexer', () => {
       expect(result.searchableContent).toContain('SYS_UNIQUE_TOKEN');
     });
 
+    it('indexes queued user message content (queue-operation)', async () => {
+      const p = await writeJsonl([
+        { type: 'queue-operation', operation: 'enqueue', content: 'queued ask about QUEUE_UNIQUE_TOKEN' },
+        { type: 'user', message: { role: 'user', content: 'hi' }, cwd: '/x' },
+      ]);
+      const result = await indexer._parseJsonlStreaming(p);
+      expect(result.searchableContent).toContain('QUEUE_UNIQUE_TOKEN');
+    });
+
+    it('indexes attachment payloads (e.g. pasted file content)', async () => {
+      const p = await writeJsonl([
+        { type: 'attachment', attachment: { type: 'edited_text_file', addedLines: 'config has ATTACH_UNIQUE_TOKEN' } },
+        { type: 'user', message: { role: 'user', content: 'hi' }, cwd: '/x' },
+      ]);
+      const result = await indexer._parseJsonlStreaming(p);
+      expect(result.searchableContent).toContain('ATTACH_UNIQUE_TOKEN');
+    });
+
     it('indexes compaction summary text', async () => {
       const p = await writeJsonl([
         { type: 'summary', summary: 'prior context about SUM_UNIQUE_TOKEN', leafUuid: 'abc' },
