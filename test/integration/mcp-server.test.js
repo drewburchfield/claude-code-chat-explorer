@@ -61,6 +61,10 @@ describe('MCP server', () => {
     const link = res.content.find(c => c.type === 'resource_link');
     expect(link).toBeDefined();
     expect(link.uri).toContain('claude-chat://conversation/');
+    // The link's mimeType must match what the resource actually returns,
+    // so a client doesn't mis-parse raw JSONL as a single JSON document.
+    const read = await client.readResource({ uri: link.uri });
+    expect(link.mimeType).toBe(read.contents[0].mimeType);
   });
 
   it('list_facets returns structured facets', async () => {

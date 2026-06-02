@@ -114,7 +114,9 @@ function buildServer({ search, db }) {
               type: 'resource_link',
               uri: h.uri,
               name: `${h.project || 'conversation'} (${h.conversationId})`,
-              mimeType: 'application/json',
+              // Matches the resource handler's mimeType: transcripts are raw
+              // newline-delimited JSON, not a single JSON document.
+              mimeType: 'application/x-ndjson',
               description: h.snippet || undefined,
             })),
           ],
