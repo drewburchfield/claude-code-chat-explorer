@@ -139,10 +139,13 @@ class DatabaseManager {
    * Versions:
    *   0 = pre-versioning (only `text` blocks indexed)
    *   1 = adds `[TOOL:<name>]` and `[TOOL_RESULT]` content (PR 5)
+   *   2 = recall parity: `[THINKING]`/`[SYSTEM]`/`[SUMMARY]` content,
+   *       per-block cap raised to 256KB, per-message/per-conversation
+   *       truncation removed
    * @private
    */
   _migrateFtsContentVersion() {
-    const TARGET_VERSION = 1;
+    const TARGET_VERSION = 2;
     try {
       const current = this.db.pragma('user_version', { simple: true });
       if (current >= TARGET_VERSION) return;

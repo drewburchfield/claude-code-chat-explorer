@@ -601,4 +601,38 @@ describe('DatabaseManager', () => {
       expect(() => db.vacuum()).not.toThrow();
     });
   });
+
+  describe('FTS content version migration', () => {
+    it('initializes a fresh database at the current target version (2)', () => {
+      expect(db.db.pragma('user_version', { simple: true })).toBe(2);
+    });
+
+    it('wipes the FTS index and file_index cache when an older version is detected', () => {
+      // Simulate an older index: roll the version back and seed stale rows.
+      db.db.pragma('user_version = 1');
+      db.db.prepare(
+        `INSERT INTO file_index (file_path, mtime, size, indexed_at) VALUES (?, ?, ?, ?)`
+      ).run('/stale/file.jsonl', 123, 456, 789);
+      db.db.prepare(
+        `INSERT INTO conversation_fts (conversation_id, content, project) VALUES (?, ?, ?)`
+      ).run('stale-conv', 'stale content', 'stale-project');
+
+      // Re-run the migration as a fresh startup would.
+      db._migrateFtsContentVersion();
+
+      expect(db.db.pragma('user_version', { simple: true })).toBe(2);
+      expect(db.db.prepare(`SELECT COUNT(*) c FROM file_index`).get().c).toBe(0);
+      expect(db.db.prepare(`SELECT COUNT(*) c FROM conversation_fts`).get().c).toBe(0);
+    });
+
+    it('is a no-op when already at the target version', () => {
+      db.db.prepare(
+        `INSERT INTO file_index (file_path, mtime, size, indexed_at) VALUES (?, ?, ?, ?)`
+      ).run('/keep/file.jsonl', 1, 2, 3);
+
+      db._migrateFtsContentVersion(); // already at 2
+
+      expect(db.db.prepare(`SELECT COUNT(*) c FROM file_index`).get().c).toBe(1);
+    });
+  });
 });
