@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "claude-chats-search": {
+      "command": "node",
+      "args": ["./src/mcp/server.js"],
+      "env": {
+        "CLAUDE_DB_PATH": "${HOME}/.claude/data/conversations.db"
+      }
+    }
+  }
+}

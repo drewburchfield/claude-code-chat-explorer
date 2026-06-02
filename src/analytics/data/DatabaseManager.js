@@ -9,10 +9,14 @@ const chalk = require('chalk');
  * FTS5 provides full-text search with sub-millisecond query times.
  */
 class DatabaseManager {
-  constructor(dbPath) {
+  constructor(dbPath, options = {}) {
     this.dbPath = dbPath;
     this.db = null;
     this.sqlite3 = null;
+    // Read-only consumers (e.g. the MCP server) open the same DB file without
+    // creating schema or running migrations, so they can run safely alongside
+    // the writing app under WAL.
+    this.readonly = options.readonly === true;
   }
 
   /**
@@ -25,6 +29,14 @@ class DatabaseManager {
     } catch (err) {
       console.error('better-sqlite3 not installed. Run: npm install better-sqlite3');
       throw err;
+    }
+
+    if (this.readonly) {
+      // Open read-only; the file must already exist and we never write schema.
+      this.db = new this.sqlite3(this.dbPath, { readonly: true, fileMustExist: true });
+      this.db.pragma('cache_size = -64000');
+      this.db.pragma('temp_store = MEMORY');
+      return this;
     }
 
     // Ensure directory exists
