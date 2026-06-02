@@ -76,43 +76,47 @@ describe('DatabaseManager', () => {
   });
 
   describe('_escapeFtsQuery()', () => {
-    it('escapes special FTS5 characters', () => {
-      expect(db._escapeFtsQuery('test:query')).toBe('test query');
-      expect(db._escapeFtsQuery('test"quoted"')).toBe('test quoted');
-      expect(db._escapeFtsQuery('test(parens)')).toBe('test parens');
-      expect(db._escapeFtsQuery('test^caret')).toBe('test caret');
-      expect(db._escapeFtsQuery('test*wildcard')).toBe('test wildcard');
+    it('quotes bare terms so special characters are treated literally, not as FTS syntax', () => {
+      // Special chars inside a term are neutralized (quoted), preserving the
+      // term as searchable text rather than stripping it.
+      expect(db._escapeFtsQuery('test:query')).toBe('"test query"');
+      expect(db._escapeFtsQuery('test(parens)')).toBe('"test parens"');
+      expect(db._escapeFtsQuery('test^caret')).toBe('"test caret"');
+      expect(db._escapeFtsQuery('plainterm')).toBe('"plainterm"');
     });
 
-    it('removes boolean operators', () => {
-      expect(db._escapeFtsQuery('test AND query')).toBe('test query');
-      expect(db._escapeFtsQuery('test OR query')).toBe('test query');
-      expect(db._escapeFtsQuery('test NOT query')).toBe('test query');
-      expect(db._escapeFtsQuery('test NEAR query')).toBe('test query');
+    it('preserves boolean operators (uppercase, per FTS5)', () => {
+      expect(db._escapeFtsQuery('test AND query')).toBe('"test" AND "query"');
+      expect(db._escapeFtsQuery('fox OR dog')).toBe('"fox" OR "dog"');
+      expect(db._escapeFtsQuery('fox NOT dog')).toBe('"fox" NOT "dog"');
     });
 
-    it('handles case-insensitive operators', () => {
-      expect(db._escapeFtsQuery('test and query')).toBe('test query');
-      expect(db._escapeFtsQuery('test or query')).toBe('test query');
+    it('treats lowercase and/or as literal terms, not operators', () => {
+      // FTS5 operators are uppercase only; lowercase words are search terms.
+      expect(db._escapeFtsQuery('cats and dogs')).toBe('"cats" "and" "dogs"');
     });
 
-    it('normalizes whitespace', () => {
-      expect(db._escapeFtsQuery('test   multiple   spaces')).toBe('test multiple spaces');
+    it('preserves quoted phrases', () => {
+      expect(db._escapeFtsQuery('"exact phrase"')).toBe('"exact phrase"');
     });
 
-    it('returns * for empty queries after escaping', () => {
+    it('preserves a trailing-* prefix search', () => {
+      expect(db._escapeFtsQuery('clean*')).toBe('"clean"*');
+    });
+
+    it('returns * for empty or operator-only queries', () => {
       expect(db._escapeFtsQuery('')).toBe('*');
       expect(db._escapeFtsQuery('   ')).toBe('*');
       expect(db._escapeFtsQuery('AND OR NOT')).toBe('*');
     });
 
-    it('handles complex mixed input', () => {
-      const result = db._escapeFtsQuery('error:ENOENT AND (file NOT found)');
-      expect(result).not.toContain(':');
-      expect(result).not.toContain('(');
-      expect(result).not.toContain(')');
-      expect(result).not.toMatch(/\bAND\b/i);
-      expect(result).not.toMatch(/\bNOT\b/i);
+    it('handles complex mixed input without leaking raw FTS syntax from bare terms', () => {
+      const result = db._escapeFtsQuery('error:ENOENT AND filefound');
+      // The colon inside the bare term is neutralized...
+      expect(result).toContain('"error ENOENT"');
+      // ...but the operator is preserved.
+      expect(result).toMatch(/\bAND\b/);
+      expect(result).toContain('"filefound"');
     });
   });
 

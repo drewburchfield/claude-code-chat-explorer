@@ -337,12 +337,14 @@ class ChatsMobile {
     // API to search conversations with advanced filters
     this.app.post('/api/search', async (req, res) => {
       try {
-        const { query, workingDirectory, dateFrom, dateTo, contentSearch, includeSubagents = false } = req.body;
+        const { query, workingDirectory, dateFrom, dateTo, contentSearch, includeSubagents = false, project = null, model = null, subagentsOnly = false } = req.body;
 
         let results = [...this.data.conversations];
 
-        // Filter subagents unless explicitly included
-        if (!includeSubagents) {
+        // Filter subagents unless explicitly included. subagentsOnly also
+        // needs them kept in the first pass, otherwise the later intersection
+        // with the (subagent-only) FTS results would always be empty.
+        if (!includeSubagents && !subagentsOnly) {
           results = results.filter(c => !c.isSubagent);
         }
 
@@ -354,16 +356,17 @@ class ChatsMobile {
           });
         }
 
-        // Filter by date range
+        // Filter by date range on lastModified (last activity), matching the
+        // field SearchService filters on so REST and MCP stay consistent.
         if (dateFrom) {
           const fromDate = new Date(dateFrom);
-          results = results.filter(conv => new Date(conv.created) >= fromDate);
+          results = results.filter(conv => new Date(conv.lastModified) >= fromDate);
         }
 
         if (dateTo) {
           const toDate = new Date(dateTo);
           toDate.setHours(23, 59, 59, 999); // Include entire day
-          results = results.filter(conv => new Date(conv.created) <= toDate);
+          results = results.filter(conv => new Date(conv.lastModified) <= toDate);
         }
 
         // Filter by conversation metadata (filename, id)
@@ -376,14 +379,18 @@ class ChatsMobile {
           );
         }
 
-        // Search within message content using FTS5 (fast)
+        // Search within message content using FTS5 (fast), via the shared
+        // SearchService so REST and MCP cannot diverge in capability.
         if (contentSearch && contentSearch.trim()) {
           if (this.useDatabaseBackend && this.databaseBackend.isInitialized) {
-            // Use FTS5 for sub-millisecond search with snippets
-            const ftsResults = this.databaseBackend.searchConversationsWithSnippets(contentSearch, {
-              limit: 100,
-              includeSubagents
-            });
+            const ftsResults = this.databaseBackend.search({
+              query: contentSearch,
+              includeSubagents,
+              subagentsOnly,
+              project,
+              model,
+              limit: 100
+            }).results;
 
             // If we had other filters applied, intersect with FTS results
             if (workingDirectory || dateFrom || dateTo || query) {
@@ -429,6 +436,20 @@ class ChatsMobile {
       } catch (error) {
         console.error('Error searching conversations:', error);
         res.status(500).json({ error: 'Internal server error', message: error.message });
+      }
+    });
+
+    // API to list facet values (projects, models, tools, date range) for
+    // building search filter controls. Same data the MCP server exposes.
+    this.app.get('/api/facets', (req, res) => {
+      try {
+        if (this.useDatabaseBackend && this.databaseBackend.isInitialized) {
+          return res.json(this.databaseBackend.facets());
+        }
+        res.json({ projects: [], models: [], tools: [], dateRange: { min: null, max: null } });
+      } catch (error) {
+        console.error('Error serving facets:', error);
+        res.status(500).json({ error: 'Internal server error' });
       }
     });
 

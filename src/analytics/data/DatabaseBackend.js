@@ -3,6 +3,7 @@ const path = require('path');
 const os = require('os');
 const DatabaseManager = require('./DatabaseManager');
 const Indexer = require('./Indexer');
+const SearchService = require('../search/SearchService');
 
 /**
  * DatabaseBackend - Integration layer between SQLite database and ChatsMobile
@@ -52,6 +53,10 @@ class DatabaseBackend {
 
       // Initialize indexer
       this.indexer = new Indexer(this.db, this.claudeDir);
+
+      // The single search query path, shared by REST and MCP. Wraps this
+      // backend so results come back in the transformed (UI-ready) shape.
+      this.searchService = new SearchService(this);
 
       if (this.backgroundIndex) {
         // Mark ready now and index in the background. The previously indexed
@@ -174,12 +179,45 @@ class DatabaseBackend {
     }
 
     const conversations = this.db.searchConversationsWithSnippets(query, options);
-    return conversations.map(conv => ({
+    const out = conversations.map(conv => ({
       ...this._transformConversation(conv),
       snippet: conv.snippet,
       searchTerm: conv.searchTerm,
       relevance: conv.relevance
     }));
+    // Propagate the degraded-search flag from the DB layer's fallback path so
+    // SearchService and the REST response can surface it.
+    if (conversations._searchDegraded) out._searchDegraded = true;
+    return out;
+  }
+
+  /**
+   * Facet values for building search filters. Passthrough to the DB layer.
+   * @returns {Object}
+   */
+  getSearchFacets() {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db.getSearchFacets();
+  }
+
+  /**
+   * Unified search via the shared SearchService (filters, operators, subagent
+   * control, grouping, pagination).
+   * @param {Object} params - See SearchService.search
+   * @returns {Object} { results, total, appliedFilters, searchMode, degraded }
+   */
+  search(params = {}) {
+    if (!this.searchService) throw new Error('Database not initialized');
+    return this.searchService.search(params);
+  }
+
+  /**
+   * Facet values via the shared SearchService.
+   * @returns {Object}
+   */
+  facets() {
+    if (!this.searchService) throw new Error('Database not initialized');
+    return this.searchService.facets();
   }
 
   /**
