@@ -2337,6 +2337,32 @@
                         </div>
                     </div>
 
+                    <!-- Project / Model facet filters (populated from /api/facets) -->
+                    <div class="search-filter-group">
+                        <label class="search-filter-label">Project</label>
+                        <select class="search-filter-input" id="filterProject">
+                            <option value="">All projects</option>
+                        </select>
+                    </div>
+
+                    <div class="search-filter-group">
+                        <label class="search-filter-label">Model</label>
+                        <select class="search-filter-input" id="filterModel">
+                            <option value="">All models</option>
+                        </select>
+                    </div>
+
+                    <!-- Subagent controls -->
+                    <div class="search-filter-group">
+                        <label class="search-filter-label">Subagents</label>
+                        <label style="display:flex;align-items:center;gap:8px;font-size:0.85rem;color:var(--text-secondary);">
+                            <input type="checkbox" id="filterIncludeSubagents" /> Include subagent conversations
+                        </label>
+                        <label style="display:flex;align-items:center;gap:8px;font-size:0.85rem;color:var(--text-secondary);margin-top:6px;">
+                            <input type="checkbox" id="filterSubagentsOnly" /> Subagents only
+                        </label>
+                    </div>
+
                     <!-- Date Range Filter -->
                     <div class="search-filter-group">
                         <label class="search-filter-label">
@@ -2790,6 +2816,7 @@
                 this.setupRealTimeUpdates();
                 this.loadToolsPreference();
                 this.startWatcherHealthPoll();
+                this.loadFacets();
                 await this.loadConversations();
             }
 
@@ -4371,12 +4398,18 @@
                     conversationsList.innerHTML = '<div class="loading-spinner" style="margin: 40px auto;"></div>';
 
                     // Get filter values
+                    const subagentsOnly = document.getElementById('filterSubagentsOnly')?.checked || false;
                     const filters = {
                         query: document.getElementById('filterQuery').value.trim(),
                         workingDirectory: document.getElementById('filterWorkingDirectory').value.trim(),
                         dateFrom: document.getElementById('filterDateFrom').value,
                         dateTo: document.getElementById('filterDateTo').value,
-                        contentSearch: document.getElementById('filterContentSearch').value.trim()
+                        contentSearch: document.getElementById('filterContentSearch').value.trim(),
+                        project: document.getElementById('filterProject')?.value || '',
+                        model: document.getElementById('filterModel')?.value || '',
+                        // Subagents-only implies including them in the candidate set.
+                        includeSubagents: (document.getElementById('filterIncludeSubagents')?.checked || false) || subagentsOnly,
+                        subagentsOnly
                     };
 
                     // Call the search API
@@ -4544,6 +4577,36 @@
                 } catch (error) {
                     console.error('Error loading directories:', error);
                     listContainer.innerHTML = '<div class="folder-browser-empty">Error loading directories</div>';
+                }
+            }
+
+            // Populate the Project/Model search filters from the backend facets,
+            // so the UI exposes exactly what the search backend supports.
+            async loadFacets() {
+                try {
+                    const response = await fetch('/api/facets');
+                    if (!response.ok) return;
+                    const facets = await response.json();
+                    const fill = (id, values, allLabel) => {
+                        const sel = document.getElementById(id);
+                        if (!sel) return;
+                        const current = sel.value;
+                        // Build options via DOM so facet values can't inject markup.
+                        sel.replaceChildren();
+                        const all = document.createElement('option');
+                        all.value = ''; all.textContent = allLabel;
+                        sel.appendChild(all);
+                        (values || []).forEach(v => {
+                            const opt = document.createElement('option');
+                            opt.value = v; opt.textContent = v;
+                            sel.appendChild(opt);
+                        });
+                        if (current) sel.value = current;
+                    };
+                    fill('filterProject', facets.projects, 'All projects');
+                    fill('filterModel', facets.models, 'All models');
+                } catch (error) {
+                    console.error('Error loading facets:', error);
                 }
             }
 
@@ -4947,6 +5010,10 @@
                 document.getElementById('filterDateFrom').value = '';
                 document.getElementById('filterDateTo').value = '';
                 document.getElementById('filterContentSearch').value = '';
+                const proj = document.getElementById('filterProject'); if (proj) proj.value = '';
+                const model = document.getElementById('filterModel'); if (model) model.value = '';
+                const incSub = document.getElementById('filterIncludeSubagents'); if (incSub) incSub.checked = false;
+                const subOnly = document.getElementById('filterSubagentsOnly'); if (subOnly) subOnly.checked = false;
             }
 
             async clearAllFilters() {

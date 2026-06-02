@@ -339,7 +339,13 @@ class ChatsMobile {
       try {
         const { query, workingDirectory, dateFrom, dateTo, contentSearch, includeSubagents = false, project = null, model = null, subagentsOnly = false } = req.body;
 
-        let results = [...this.data.conversations];
+        // The in-memory snapshot excludes subagents (they're grouped under
+        // parents), so when subagents are requested, source the base set from
+        // the DB which holds them. Otherwise use the live in-memory list.
+        const needSubagents = includeSubagents || subagentsOnly;
+        let results = (needSubagents && this.useDatabaseBackend && this.databaseBackend.isInitialized)
+          ? this.databaseBackend.getConversations({ includeSubagents: true })
+          : [...this.data.conversations];
 
         // Filter subagents unless explicitly included. subagentsOnly also
         // needs them kept in the first pass, otherwise the later intersection
@@ -377,6 +383,20 @@ class ChatsMobile {
             conv.id.toLowerCase().includes(searchTerm) ||
             (conv.project && conv.project.toLowerCase().includes(searchTerm))
           );
+        }
+
+        // Facet filters (project/model) and subagentsOnly apply in browse mode
+        // too, not only when a content search is present — otherwise selecting
+        // a Project/Model or "Subagents only" without a query returns unfiltered
+        // results. (The contentSearch path applies these via SearchService.)
+        if (project) {
+          results = results.filter(conv => conv.project === project);
+        }
+        if (model) {
+          results = results.filter(conv => (conv.modelInfo?.primaryModel || null) === model);
+        }
+        if (subagentsOnly) {
+          results = results.filter(conv => conv.isSubagent);
         }
 
         // Search within message content using FTS5 (fast), via the shared

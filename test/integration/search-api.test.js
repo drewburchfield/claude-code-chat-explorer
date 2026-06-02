@@ -79,6 +79,20 @@ describe('SearchService REST surface', () => {
     expect(res.body.results.every(r => r.isSubagent)).toBe(true);
   });
 
+  it('POST /api/search applies project filter with NO content query (browse mode)', async () => {
+    const res = await request(app.app).post('/api/search')
+      .send({ project: 'a', includeSubagents: true }).expect(200);
+    expect(res.body.results.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.results.every(r => r.project === 'a')).toBe(true);
+  });
+
+  it('POST /api/search applies subagentsOnly with NO content query (browse mode)', async () => {
+    const res = await request(app.app).post('/api/search')
+      .send({ subagentsOnly: true }).expect(200);
+    expect(res.body.results.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.results.every(r => r.isSubagent)).toBe(true);
+  });
+
   it('POST /api/search filters by model', async () => {
     const res = await request(app.app).post('/api/search')
       .send({ contentSearch: 'the', model: 'claude-sonnet-4' }).expect(200);
