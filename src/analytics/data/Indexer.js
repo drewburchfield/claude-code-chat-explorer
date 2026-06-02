@@ -47,8 +47,15 @@ class Indexer {
       stats.filesScanned = files.length;
       console.log(chalk.gray(`Found ${files.length} JSONL files to process`));
 
-      // Get currently indexed files to detect deletions
+      // Get currently indexed files to detect deletions. Union file_index with
+      // the conversations table so orphans are still detected when file_index
+      // was cleared by a content-version migration (otherwise a conversation
+      // whose file was deleted before the upgrade would linger as a ghost FTS
+      // result, since an empty file_index hides it from this cleanup pass).
       const indexedPaths = this.db.getIndexedFilePaths();
+      for (const p of this.db.getConversationFilePaths()) {
+        indexedPaths.add(p);
+      }
 
       // Process files in batches for progress reporting
       const batchSize = 50;

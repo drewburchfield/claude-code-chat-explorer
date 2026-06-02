@@ -681,6 +681,18 @@ class DatabaseManager {
   }
 
   /**
+   * Get all conversation file paths from the conversations table. This is the
+   * authoritative record of what's indexed and survives a file_index clear
+   * (e.g. a content-version migration), so deletion detection can find orphans
+   * even when file_index has been emptied to force a reindex.
+   * @returns {Set<string>} Set of file paths
+   */
+  getConversationFilePaths() {
+    const stmt = this.db.prepare('SELECT file_path FROM conversations');
+    return new Set(stmt.all().map(row => row.file_path));
+  }
+
+  /**
    * Convert database row to conversation object
    * @private
    */

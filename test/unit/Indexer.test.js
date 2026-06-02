@@ -560,6 +560,35 @@ describe('Indexer', () => {
       expect(conversations[0].messageCount).toBeGreaterThan(0);
     });
 
+    it('removes orphaned conversations even when file_index was cleared (migration case)', async () => {
+      // Reproduces the Devin finding: after a content-version migration clears
+      // file_index (to force reprocessing), a conversation whose file was
+      // deleted before the upgrade must still be detected as gone and removed,
+      // FTS row included — otherwise it lingers as a ghost search result.
+      const [filePath] = await setupFixturesInProjectsDir(projectsDir, {
+        fixtures: ['simple.jsonl'],
+      });
+      const origLog = console.log; console.log = () => {};
+
+      await indexer.runFullIndex();
+      const before = db.getConversations({ includeSubagents: true });
+      expect(before.length).toBe(1);
+      const orphanId = before[0].id;
+      expect(db.searchConversationsWithSnippets('reverse', { includeSubagents: true }).length).toBe(1);
+
+      // Simulate "deleted before upgrade" + "migration cleared file_index".
+      await fs.remove(filePath);
+      db.db.prepare('DELETE FROM file_index').run();
+
+      await indexer.runFullIndex();
+      console.log = origLog;
+
+      // The orphan is gone from conversations AND from FTS.
+      expect(db.getConversations({ includeSubagents: true }).length).toBe(0);
+      expect(db.getConversation(orphanId)).toBeNull();
+      expect(db.searchConversationsWithSnippets('reverse', { includeSubagents: true }).length).toBe(0);
+    });
+
     it('removes deleted files from database', async () => {
       const [filePath] = await setupFixturesInProjectsDir(projectsDir, {
         fixtures: ['simple.jsonl'],
