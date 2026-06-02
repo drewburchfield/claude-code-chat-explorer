@@ -588,6 +588,26 @@ class DatabaseManager {
   }
 
   /**
+   * Facet values for building search filters (projects, models, tools, date
+   * range). Computed with cheap SQL aggregates over the metadata tables, not
+   * the FTS index, so it stays fast on a multi-GB corpus.
+   * @returns {{projects: string[], models: string[], tools: string[], dateRange: {min: ?number, max: ?number}}}
+   */
+  getSearchFacets() {
+    const projects = this.getProjects();
+    const models = this.db.prepare(
+      `SELECT DISTINCT primary_model FROM conversations WHERE primary_model IS NOT NULL ORDER BY primary_model`
+    ).all().map(r => r.primary_model);
+    const tools = this.db.prepare(
+      `SELECT DISTINCT tool_name FROM tool_usage ORDER BY tool_name`
+    ).all().map(r => r.tool_name);
+    const range = this.db.prepare(
+      `SELECT MIN(last_modified) as min, MAX(last_modified) as max FROM conversations`
+    ).get();
+    return { projects, models, tools, dateRange: { min: range.min ?? null, max: range.max ?? null } };
+  }
+
+  /**
    * Get aggregated tool usage statistics
    * @returns {Object} Tool usage summary
    */
@@ -726,13 +746,41 @@ class DatabaseManager {
    * @private
    */
   _escapeFtsQuery(query) {
-    // Escape all FTS5 special characters and operators
-    // FTS5 operators: AND OR NOT NEAR " ( ) * : ^ - +
-    return query
-      .replace(/[":()^*\-+]/g, ' ')  // Remove special chars
-      .replace(/\b(AND|OR|NOT|NEAR)\b/gi, ' ')  // Remove boolean operators
-      .replace(/\s+/g, ' ')
-      .trim() || '*';  // Default to match-all if empty after escaping
+    // Build a safe FTS5 query that PRESERVES the supported operator surface
+    // (AND / OR / NOT / NEAR, "quoted phrases", and trailing-* prefix search)
+    // while neutralizing stray special characters that would otherwise be
+    // FTS5 syntax. Bare terms are wrapped in double quotes so characters like
+    // ( ) : ^ + - inside them are treated literally rather than as operators.
+    // Malformed queries that still slip through are caught by the callers'
+    // try/catch, which flags degraded search rather than throwing.
+    if (!query || !query.trim()) return '*';
+
+    const OPERATORS = new Set(['AND', 'OR', 'NOT', 'NEAR']); // case-sensitive per FTS5
+    // Tokenize into quoted phrases or whitespace-delimited runs.
+    const tokens = query.match(/"[^"]*"|\S+/g) || [];
+    const out = [];
+
+    for (let tok of tokens) {
+      if (OPERATORS.has(tok)) { out.push(tok); continue; }
+      if (tok.length >= 2 && tok.startsWith('"') && tok.endsWith('"')) {
+        out.push(tok); // already a phrase
+        continue;
+      }
+      // Preserve a trailing-* prefix marker.
+      let prefix = '';
+      if (tok.endsWith('*')) { prefix = '*'; tok = tok.slice(0, -1); }
+      // Strip characters that are FTS5 syntax inside a bare term.
+      const cleaned = tok.replace(/["()^:+\-]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (!cleaned) continue;
+      out.push(`"${cleaned}"${prefix}`);
+    }
+
+    // A query of only operators (or nothing) is degenerate FTS5 syntax; treat
+    // it as match-all rather than letting it raise a parse error.
+    const hasTerm = out.some(t => !OPERATORS.has(t));
+    if (!hasTerm) return '*';
+
+    return out.join(' ').trim() || '*';
   }
 
   /**
