@@ -3,6 +3,12 @@ const fs = require('fs-extra');
 const path = require('path');
 const readline = require('readline');
 
+// Per-block safety ceiling for FTS content. We no longer truncate at 2000
+// chars (that lost recall vs the on-disk text); the only cap is this generous
+// ceiling, which exists solely to stop a single pathological block (e.g. a
+// base64 blob that slipped past the image filter) from bloating the index.
+const BLOCK_CHAR_CAP = 256 * 1024;
+
 /**
  * Indexer - Efficiently indexes JSONL conversation files into SQLite database
  *
@@ -312,8 +318,10 @@ class Indexer {
   /**
    * Extract searchable text from a message content payload.
    *
-   * Pulls in three kinds of block:
+   * Pulls in four kinds of block:
    *   - `text` blocks verbatim
+   *   - `thinking` blocks as `[THINKING] <reasoning>`, so a search for a
+   *     token that only appeared in assistant reasoning hits the session
    *   - `tool_use` blocks as `[TOOL:<name>] <stringified-input>`, so a
    *     search for a Bash command line or a file path passed to Read
    *     hits the session that ran it
@@ -343,16 +351,18 @@ class Indexer {
 
       if (block.type === 'text' && block.text) {
         parts.push(block.text);
+      } else if (block.type === 'thinking' && block.thinking) {
+        // Index assistant reasoning so a search for a token that only
+        // appeared in a thinking block still finds the session.
+        parts.push(`[THINKING] ${block.thinking}`);
       } else if (block.type === 'tool_use') {
         const name = block.name || 'unknown';
-        // Truncate the per-block input JSON so a single huge tool
-        // call can't dominate the 100K-char session-level cap and
-        // crowd out the surrounding conversation text. 2K is enough
-        // for any realistic Bash command, file path, or grep query.
-        const inputText = this._stringifyToolPayload(block.input).slice(0, 2000);
+        // Cap only at the 256KB safety ceiling so realistic tool inputs
+        // (file paths, commands, payloads) match on disk.
+        const inputText = this._stringifyToolPayload(block.input).slice(0, BLOCK_CHAR_CAP);
         parts.push(`[TOOL:${name}] ${inputText}`);
       } else if (block.type === 'tool_result') {
-        const resultText = this._stringifyToolPayload(block.content).slice(0, 2000);
+        const resultText = this._stringifyToolPayload(block.content).slice(0, BLOCK_CHAR_CAP);
         parts.push(`[TOOL_RESULT] ${resultText}`);
       }
     }

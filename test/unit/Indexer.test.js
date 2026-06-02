@@ -214,14 +214,46 @@ describe('Indexer', () => {
       expect(result).not.toContain('ignored-bytes');
     });
 
-    it('caps the per-block tool content at 2000 chars so one huge call cant dominate the index', () => {
-      const huge = 'X'.repeat(5000);
+    it('keeps tool content up to the 256KB safety ceiling so search matches on-disk text', () => {
+      // Recall parity: we no longer truncate at 2000 chars. The only cap is a
+      // 256KB-per-block safety ceiling to guard against pathological base64
+      // that slips past the image filter. A realistic 100KB tool_result must
+      // survive intact, including a tail token grep would find on disk.
+      const body = 'X'.repeat(100000) + ' TOOL_TAIL_TOKEN';
+      const content = [
+        { type: 'tool_result', tool_use_id: 'abc', content: body },
+      ];
+      const result = indexer._extractTextContent(content);
+      expect(result).toContain('TOOL_TAIL_TOKEN');
+    });
+
+    it('caps a single block at the 256KB safety ceiling', () => {
+      const huge = 'X'.repeat(300000);
       const content = [
         { type: 'tool_result', tool_use_id: 'abc', content: huge },
       ];
       const result = indexer._extractTextContent(content);
-      // [TOOL_RESULT] prefix plus a space, plus up to 2000 X's.
-      expect(result.length).toBeLessThanOrEqual('[TOOL_RESULT] '.length + 2000);
+      expect(result.length).toBeLessThanOrEqual('[TOOL_RESULT] '.length + 256 * 1024);
+      // ...but it keeps far more than the old 2000-char cap.
+      expect(result.length).toBeGreaterThan(200000);
+    });
+
+    it('indexes thinking blocks so reasoning is searchable', () => {
+      const content = [
+        { type: 'thinking', thinking: 'UNIQ_THINK_TOKEN private reasoning' },
+        { type: 'text', text: 'visible answer' },
+      ];
+      const result = indexer._extractTextContent(content);
+      expect(result).toContain('[THINKING]');
+      expect(result).toContain('UNIQ_THINK_TOKEN');
+      expect(result).toContain('visible answer');
+    });
+
+    it('does not truncate a long text block', () => {
+      const big = 'y'.repeat(8000) + ' TEXT_TAIL_TOKEN';
+      const content = [{ type: 'text', text: big }];
+      const result = indexer._extractTextContent(content);
+      expect(result).toContain('TEXT_TAIL_TOKEN');
     });
 
     it('extracts text from single text block object', () => {
