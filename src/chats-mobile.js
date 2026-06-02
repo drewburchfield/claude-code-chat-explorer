@@ -49,7 +49,10 @@ class ChatsMobile {
     // Initialize DatabaseBackend for efficient conversation storage
     // Uses SQLite + FTS5 instead of loading all files into memory
     this.databaseBackend = new DatabaseBackend(claudeDir, {
-      dbPath: process.env.CLAUDE_DB_PATH // Allows Docker to specify writable location
+      dbPath: process.env.CLAUDE_DB_PATH, // Allows Docker to specify writable location
+      // Production starts the server before indexing finishes so an upgrade
+      // reindex doesn't black out the UI. Tests omit this for determinism.
+      backgroundIndex: options.backgroundIndex === true
     });
     this.useDatabaseBackend = true; // Enable database mode by default
 
@@ -291,7 +294,10 @@ class ChatsMobile {
           fileWatcherMetrics: this.fileWatcher.getMetrics(),
           database: {
             enabled: this.useDatabaseBackend,
-            initialized: !!(this.databaseBackend && this.databaseBackend.isInitialized)
+            initialized: !!(this.databaseBackend && this.databaseBackend.isInitialized),
+            indexStatus: (this.useDatabaseBackend && this.databaseBackend?.getIndexStatus)
+              ? this.databaseBackend.getIndexStatus()
+              : null
           }
         });
       } catch (error) {
@@ -1599,8 +1605,10 @@ class ChatsMobile {
  */
 async function startChatsMobile(options = {}) {
   console.log(chalk.blue('📱 Starting Claude Code Chats Mobile...'));
-  
-  const chatsMobile = new ChatsMobile(options);
+
+  // Production: serve immediately and index in the background so an upgrade
+  // reindex doesn't block the UI. Callers can override.
+  const chatsMobile = new ChatsMobile({ backgroundIndex: true, ...options });
   
   try {
     await chatsMobile.initialize();

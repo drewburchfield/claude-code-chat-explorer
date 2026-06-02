@@ -150,12 +150,13 @@ class DatabaseManager {
       const current = this.db.pragma('user_version', { simple: true });
       if (current >= TARGET_VERSION) return;
 
-      console.log(chalk.cyan(`📦 FTS schema bump: user_version ${current} → ${TARGET_VERSION}; clearing FTS index for reindex.`));
-      // Drop just the FTS data, leave the conversations table alone -
-      // the upcoming indexer pass will re-populate FTS from the same
-      // JSONL files. Clearing file_index forces the watcher's
-      // mtime-skip check to treat every file as new.
-      this.db.prepare(`DELETE FROM conversation_fts`).run();
+      console.log(chalk.cyan(`📦 FTS schema bump: user_version ${current} → ${TARGET_VERSION}; scheduling background reindex.`));
+      // Graceful degradation: do NOT wipe conversation_fts up front. The old
+      // rows stay searchable while the background reindex runs, and each
+      // conversation's FTS is replaced in place as its file is reprocessed
+      // (upsertConversation deletes+reinserts per conversation_id). Clearing
+      // file_index is what forces every file to be treated as changed so the
+      // next indexer pass re-extracts all of them with the new content shape.
       this.db.prepare(`DELETE FROM file_index`).run();
       this.db.pragma(`user_version = ${TARGET_VERSION}`);
     } catch (err) {

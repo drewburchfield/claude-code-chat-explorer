@@ -22,9 +22,18 @@ class DatabaseBackend {
       process.env.CLAUDE_DB_PATH ||
       path.join(this.claudeDir, 'data', 'conversations.db');
 
+    // When true, the initial index runs in the background so the HTTP server
+    // can start serving immediately (the existing index stays searchable and
+    // is refreshed in place). When false (default, used by tests), the initial
+    // index completes before initialize() resolves.
+    this.backgroundIndex = options.backgroundIndex === true;
+
     this.db = null;
     this.indexer = null;
     this.isInitialized = false;
+
+    // Observable indexing status for health/UI surfaces.
+    this.indexStatus = { state: 'idle', startedAt: null, finishedAt: null, lastStats: null, error: null };
   }
 
   /**
@@ -44,11 +53,18 @@ class DatabaseBackend {
       // Initialize indexer
       this.indexer = new Indexer(this.db, this.claudeDir);
 
-      // Run initial indexing
-      await this.runIndex();
-
-      this.isInitialized = true;
-      console.log(chalk.green('✅ Database backend initialized'));
+      if (this.backgroundIndex) {
+        // Mark ready now and index in the background. The previously indexed
+        // content stays searchable and is refreshed in place per conversation.
+        this.isInitialized = true;
+        console.log(chalk.green('✅ Database backend initialized (indexing in background)'));
+        this._runIndexInBackground();
+      } else {
+        // Run initial indexing to completion (deterministic for tests/CLI).
+        await this._runTrackedIndex();
+        this.isInitialized = true;
+        console.log(chalk.green('✅ Database backend initialized'));
+      }
 
     } catch (err) {
       // Clean up database connection on error
@@ -75,6 +91,43 @@ class DatabaseBackend {
       throw new Error('Database not initialized');
     }
     return await this.indexer.runFullIndex();
+  }
+
+  /**
+   * Run the index while updating observable status. Used for both the
+   * synchronous initial index and the background path.
+   * @returns {Promise<Object>} Indexing statistics
+   * @private
+   */
+  async _runTrackedIndex() {
+    this.indexStatus = { state: 'indexing', startedAt: Date.now(), finishedAt: null, lastStats: null, error: null };
+    try {
+      const stats = await this.runIndex();
+      this.indexStatus = { state: 'idle', startedAt: this.indexStatus.startedAt, finishedAt: Date.now(), lastStats: stats, error: null };
+      return stats;
+    } catch (err) {
+      this.indexStatus = { state: 'error', startedAt: this.indexStatus.startedAt, finishedAt: Date.now(), lastStats: null, error: err.message };
+      throw err;
+    }
+  }
+
+  /**
+   * Kick off the initial index without blocking initialize(). Errors are
+   * recorded in indexStatus rather than thrown, since nothing awaits this.
+   * @private
+   */
+  _runIndexInBackground() {
+    this._runTrackedIndex().catch(err => {
+      console.error(chalk.red(`❌ Background index failed: ${err.message}`));
+    });
+  }
+
+  /**
+   * Current indexing status for health/UI surfaces.
+   * @returns {{state: string, startedAt: ?number, finishedAt: ?number, lastStats: ?Object, error: ?string}}
+   */
+  getIndexStatus() {
+    return { ...this.indexStatus };
   }
 
   /**

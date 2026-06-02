@@ -607,7 +607,7 @@ describe('DatabaseManager', () => {
       expect(db.db.pragma('user_version', { simple: true })).toBe(2);
     });
 
-    it('wipes the FTS index and file_index cache when an older version is detected', () => {
+    it('clears file_index and bumps version, but preserves FTS for graceful degradation', () => {
       // Simulate an older index: roll the version back and seed stale rows.
       db.db.pragma('user_version = 1');
       db.db.prepare(
@@ -621,8 +621,11 @@ describe('DatabaseManager', () => {
       db._migrateFtsContentVersion();
 
       expect(db.db.pragma('user_version', { simple: true })).toBe(2);
+      // file_index is cleared so every file is reprocessed...
       expect(db.db.prepare(`SELECT COUNT(*) c FROM file_index`).get().c).toBe(0);
-      expect(db.db.prepare(`SELECT COUNT(*) c FROM conversation_fts`).get().c).toBe(0);
+      // ...but the existing FTS rows are kept so search keeps working while
+      // the background reindex replaces each conversation in place.
+      expect(db.db.prepare(`SELECT COUNT(*) c FROM conversation_fts`).get().c).toBe(1);
     });
 
     it('is a no-op when already at the target version', () => {
