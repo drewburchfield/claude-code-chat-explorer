@@ -139,20 +139,24 @@ class DatabaseManager {
    * Versions:
    *   0 = pre-versioning (only `text` blocks indexed)
    *   1 = adds `[TOOL:<name>]` and `[TOOL_RESULT]` content (PR 5)
+   *   2 = recall parity: `[THINKING]`/`[SYSTEM]`/`[SUMMARY]` content,
+   *       per-block cap raised to 256KB, per-message/per-conversation
+   *       truncation removed
    * @private
    */
   _migrateFtsContentVersion() {
-    const TARGET_VERSION = 1;
+    const TARGET_VERSION = 2;
     try {
       const current = this.db.pragma('user_version', { simple: true });
       if (current >= TARGET_VERSION) return;
 
-      console.log(chalk.cyan(`📦 FTS schema bump: user_version ${current} → ${TARGET_VERSION}; clearing FTS index for reindex.`));
-      // Drop just the FTS data, leave the conversations table alone -
-      // the upcoming indexer pass will re-populate FTS from the same
-      // JSONL files. Clearing file_index forces the watcher's
-      // mtime-skip check to treat every file as new.
-      this.db.prepare(`DELETE FROM conversation_fts`).run();
+      console.log(chalk.cyan(`📦 FTS schema bump: user_version ${current} → ${TARGET_VERSION}; scheduling background reindex.`));
+      // Graceful degradation: do NOT wipe conversation_fts up front. The old
+      // rows stay searchable while the background reindex runs, and each
+      // conversation's FTS is replaced in place as its file is reprocessed
+      // (upsertConversation deletes+reinserts per conversation_id). Clearing
+      // file_index is what forces every file to be treated as changed so the
+      // next indexer pass re-extracts all of them with the new content shape.
       this.db.prepare(`DELETE FROM file_index`).run();
       this.db.pragma(`user_version = ${TARGET_VERSION}`);
     } catch (err) {
@@ -673,6 +677,18 @@ class DatabaseManager {
    */
   getIndexedFilePaths() {
     const stmt = this.db.prepare('SELECT file_path FROM file_index');
+    return new Set(stmt.all().map(row => row.file_path));
+  }
+
+  /**
+   * Get all conversation file paths from the conversations table. This is the
+   * authoritative record of what's indexed and survives a file_index clear
+   * (e.g. a content-version migration), so deletion detection can find orphans
+   * even when file_index has been emptied to force a reindex.
+   * @returns {Set<string>} Set of file paths
+   */
+  getConversationFilePaths() {
+    const stmt = this.db.prepare('SELECT file_path FROM conversations');
     return new Set(stmt.all().map(row => row.file_path));
   }
 

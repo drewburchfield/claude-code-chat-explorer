@@ -153,6 +153,71 @@ describe('Indexer', () => {
     });
   });
 
+  describe('_parseJsonlStreaming() recall parity', () => {
+    async function writeJsonl(lines) {
+      const p = path.join(projectsDir, `recall-${Date.now()}-${Math.random().toString(36).slice(2)}.jsonl`);
+      await fs.writeFile(p, lines.map(l => JSON.stringify(l)).join('\n'));
+      return p;
+    }
+
+    it('indexes system entry content (string content, no message wrapper)', async () => {
+      const p = await writeJsonl([
+        { type: 'user', message: { role: 'user', content: 'hi' }, cwd: '/x' },
+        { type: 'system', subtype: 'reminder', content: 'reminder mentions SYS_UNIQUE_TOKEN here' },
+      ]);
+      const result = await indexer._parseJsonlStreaming(p);
+      expect(result.searchableContent).toContain('SYS_UNIQUE_TOKEN');
+    });
+
+    it('indexes queued user message content (queue-operation)', async () => {
+      const p = await writeJsonl([
+        { type: 'queue-operation', operation: 'enqueue', content: 'queued ask about QUEUE_UNIQUE_TOKEN' },
+        { type: 'user', message: { role: 'user', content: 'hi' }, cwd: '/x' },
+      ]);
+      const result = await indexer._parseJsonlStreaming(p);
+      expect(result.searchableContent).toContain('QUEUE_UNIQUE_TOKEN');
+    });
+
+    it('indexes attachment payloads (e.g. pasted file content)', async () => {
+      const p = await writeJsonl([
+        { type: 'attachment', attachment: { type: 'edited_text_file', addedLines: 'config has ATTACH_UNIQUE_TOKEN' } },
+        { type: 'user', message: { role: 'user', content: 'hi' }, cwd: '/x' },
+      ]);
+      const result = await indexer._parseJsonlStreaming(p);
+      expect(result.searchableContent).toContain('ATTACH_UNIQUE_TOKEN');
+    });
+
+    it('indexes compaction summary text', async () => {
+      const p = await writeJsonl([
+        { type: 'summary', summary: 'prior context about SUM_UNIQUE_TOKEN', leafUuid: 'abc' },
+        { type: 'user', message: { role: 'user', content: 'continue' }, cwd: '/x' },
+      ]);
+      const result = await indexer._parseJsonlStreaming(p);
+      expect(result.searchableContent).toContain('SUM_UNIQUE_TOKEN');
+    });
+
+    it('does not cap a single message at 2000 chars', async () => {
+      const big = 'm'.repeat(8000) + ' MSG_TAIL_TOKEN';
+      const p = await writeJsonl([
+        { type: 'user', message: { role: 'user', content: big }, cwd: '/x' },
+      ]);
+      const result = await indexer._parseJsonlStreaming(p);
+      expect(result.searchableContent).toContain('MSG_TAIL_TOKEN');
+    });
+
+    it('does not cap total conversation content at 100k', async () => {
+      const lines = [];
+      for (let i = 0; i < 60; i++) {
+        lines.push({ type: 'user', message: { role: 'user', content: 'z'.repeat(2000) } });
+      }
+      lines.push({ type: 'assistant', message: { role: 'assistant', content: 'FAR_TAIL_TOKEN' } });
+      const p = await writeJsonl(lines);
+      const result = await indexer._parseJsonlStreaming(p);
+      expect(result.searchableContent.length).toBeGreaterThan(100000);
+      expect(result.searchableContent).toContain('FAR_TAIL_TOKEN');
+    });
+  });
+
   describe('_extractTextContent()', () => {
     it('extracts text from string content', () => {
       const content = 'Simple string content';
@@ -214,14 +279,46 @@ describe('Indexer', () => {
       expect(result).not.toContain('ignored-bytes');
     });
 
-    it('caps the per-block tool content at 2000 chars so one huge call cant dominate the index', () => {
-      const huge = 'X'.repeat(5000);
+    it('keeps tool content up to the 256KB safety ceiling so search matches on-disk text', () => {
+      // Recall parity: we no longer truncate at 2000 chars. The only cap is a
+      // 256KB-per-block safety ceiling to guard against pathological base64
+      // that slips past the image filter. A realistic 100KB tool_result must
+      // survive intact, including a tail token grep would find on disk.
+      const body = 'X'.repeat(100000) + ' TOOL_TAIL_TOKEN';
+      const content = [
+        { type: 'tool_result', tool_use_id: 'abc', content: body },
+      ];
+      const result = indexer._extractTextContent(content);
+      expect(result).toContain('TOOL_TAIL_TOKEN');
+    });
+
+    it('caps a single block at the 256KB safety ceiling', () => {
+      const huge = 'X'.repeat(300000);
       const content = [
         { type: 'tool_result', tool_use_id: 'abc', content: huge },
       ];
       const result = indexer._extractTextContent(content);
-      // [TOOL_RESULT] prefix plus a space, plus up to 2000 X's.
-      expect(result.length).toBeLessThanOrEqual('[TOOL_RESULT] '.length + 2000);
+      expect(result.length).toBeLessThanOrEqual('[TOOL_RESULT] '.length + 256 * 1024);
+      // ...but it keeps far more than the old 2000-char cap.
+      expect(result.length).toBeGreaterThan(200000);
+    });
+
+    it('indexes thinking blocks so reasoning is searchable', () => {
+      const content = [
+        { type: 'thinking', thinking: 'UNIQ_THINK_TOKEN private reasoning' },
+        { type: 'text', text: 'visible answer' },
+      ];
+      const result = indexer._extractTextContent(content);
+      expect(result).toContain('[THINKING]');
+      expect(result).toContain('UNIQ_THINK_TOKEN');
+      expect(result).toContain('visible answer');
+    });
+
+    it('does not truncate a long text block', () => {
+      const big = 'y'.repeat(8000) + ' TEXT_TAIL_TOKEN';
+      const content = [{ type: 'text', text: big }];
+      const result = indexer._extractTextContent(content);
+      expect(result).toContain('TEXT_TAIL_TOKEN');
     });
 
     it('extracts text from single text block object', () => {
@@ -461,6 +558,35 @@ describe('Indexer', () => {
       const conversations = db.getConversations();
       expect(conversations.length).toBe(1);
       expect(conversations[0].messageCount).toBeGreaterThan(0);
+    });
+
+    it('removes orphaned conversations even when file_index was cleared (migration case)', async () => {
+      // Reproduces the Devin finding: after a content-version migration clears
+      // file_index (to force reprocessing), a conversation whose file was
+      // deleted before the upgrade must still be detected as gone and removed,
+      // FTS row included — otherwise it lingers as a ghost search result.
+      const [filePath] = await setupFixturesInProjectsDir(projectsDir, {
+        fixtures: ['simple.jsonl'],
+      });
+      const origLog = console.log; console.log = () => {};
+
+      await indexer.runFullIndex();
+      const before = db.getConversations({ includeSubagents: true });
+      expect(before.length).toBe(1);
+      const orphanId = before[0].id;
+      expect(db.searchConversationsWithSnippets('reverse', { includeSubagents: true }).length).toBe(1);
+
+      // Simulate "deleted before upgrade" + "migration cleared file_index".
+      await fs.remove(filePath);
+      db.db.prepare('DELETE FROM file_index').run();
+
+      await indexer.runFullIndex();
+      console.log = origLog;
+
+      // The orphan is gone from conversations AND from FTS.
+      expect(db.getConversations({ includeSubagents: true }).length).toBe(0);
+      expect(db.getConversation(orphanId)).toBeNull();
+      expect(db.searchConversationsWithSnippets('reverse', { includeSubagents: true }).length).toBe(0);
     });
 
     it('removes deleted files from database', async () => {

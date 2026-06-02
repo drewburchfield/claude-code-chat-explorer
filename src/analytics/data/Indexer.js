@@ -3,6 +3,12 @@ const fs = require('fs-extra');
 const path = require('path');
 const readline = require('readline');
 
+// Per-block safety ceiling for FTS content. We no longer truncate at 2000
+// chars (that lost recall vs the on-disk text); the only cap is this generous
+// ceiling, which exists solely to stop a single pathological block (e.g. a
+// base64 blob that slipped past the image filter) from bloating the index.
+const BLOCK_CHAR_CAP = 256 * 1024;
+
 /**
  * Indexer - Efficiently indexes JSONL conversation files into SQLite database
  *
@@ -41,8 +47,15 @@ class Indexer {
       stats.filesScanned = files.length;
       console.log(chalk.gray(`Found ${files.length} JSONL files to process`));
 
-      // Get currently indexed files to detect deletions
+      // Get currently indexed files to detect deletions. Union file_index with
+      // the conversations table so orphans are still detected when file_index
+      // was cleared by a content-version migration (otherwise a conversation
+      // whose file was deleted before the upgrade would linger as a ghost FTS
+      // result, since an empty file_index hides it from this cleanup pass).
       const indexedPaths = this.db.getIndexedFilePaths();
+      for (const p of this.db.getConversationFilePaths()) {
+        indexedPaths.add(p);
+      }
 
       // Process files in batches for progress reporting
       const batchSize = 50;
@@ -237,11 +250,12 @@ class Indexer {
           if (item.message && (item.type === 'assistant' || item.type === 'user')) {
             result.messageCount++;
 
-            // Extract searchable content
+            // Extract searchable content. No per-message cap: search must
+            // match the on-disk text. The only bound is the 256KB-per-block
+            // safety ceiling inside _extractTextContent.
             const content = this._extractTextContent(item.message.content);
             if (content) {
-              // Limit content per message to prevent huge FTS entries
-              contentParts.push(content.slice(0, 2000));
+              contentParts.push(content);
             }
 
             // Track token usage from assistant messages
@@ -265,6 +279,24 @@ class Indexer {
                 result.toolUsage.total++;
               }
             }
+          } else if (item.type === 'system' && typeof item.content === 'string') {
+            // System reminders and hook output (top-level string content, no
+            // message wrapper) often quote settings, file paths, and tokens
+            // that grep finds on disk. Index them so search matches; they are
+            // not counted as messages.
+            contentParts.push(`[SYSTEM] ${item.content}`);
+          } else if (item.type === 'summary' && typeof item.summary === 'string') {
+            // Compaction summary entries that prefix resumed sessions.
+            contentParts.push(`[SUMMARY] ${item.summary}`);
+          } else if (item.type === 'queue-operation' && typeof item.content === 'string') {
+            // Queued user messages (top-level string content) are genuine
+            // user-authored text that should be searchable.
+            contentParts.push(`[QUEUED] ${item.content}`);
+          } else if (item.type === 'attachment' && item.attachment) {
+            // Pasted/attached payloads (e.g. file diffs, edited text) carry
+            // real content the user pasted in. Index the payload text.
+            const attachText = this._stringifyToolPayload(item.attachment).slice(0, BLOCK_CHAR_CAP);
+            if (attachText) contentParts.push(`[ATTACHMENT] ${attachText}`);
           }
         } catch (parseErr) {
           // Log parse errors with context (limit to avoid spam)
@@ -291,8 +323,9 @@ class Indexer {
         }
         result.modelInfo.models = modelCounts;
 
-        // Join searchable content (limit total size)
-        result.searchableContent = contentParts.join('\n').slice(0, 100000);
+        // Join searchable content. No total-size cap: the index mirrors the
+        // on-disk text. Per-block 256KB ceiling still guards pathological blobs.
+        result.searchableContent = contentParts.join('\n');
 
         resolve(result);
       });
@@ -312,8 +345,10 @@ class Indexer {
   /**
    * Extract searchable text from a message content payload.
    *
-   * Pulls in three kinds of block:
+   * Pulls in four kinds of block:
    *   - `text` blocks verbatim
+   *   - `thinking` blocks as `[THINKING] <reasoning>`, so a search for a
+   *     token that only appeared in assistant reasoning hits the session
    *   - `tool_use` blocks as `[TOOL:<name>] <stringified-input>`, so a
    *     search for a Bash command line or a file path passed to Read
    *     hits the session that ran it
@@ -343,16 +378,18 @@ class Indexer {
 
       if (block.type === 'text' && block.text) {
         parts.push(block.text);
+      } else if (block.type === 'thinking' && block.thinking) {
+        // Index assistant reasoning so a search for a token that only
+        // appeared in a thinking block still finds the session.
+        parts.push(`[THINKING] ${block.thinking}`);
       } else if (block.type === 'tool_use') {
         const name = block.name || 'unknown';
-        // Truncate the per-block input JSON so a single huge tool
-        // call can't dominate the 100K-char session-level cap and
-        // crowd out the surrounding conversation text. 2K is enough
-        // for any realistic Bash command, file path, or grep query.
-        const inputText = this._stringifyToolPayload(block.input).slice(0, 2000);
+        // Cap only at the 256KB safety ceiling so realistic tool inputs
+        // (file paths, commands, payloads) match on disk.
+        const inputText = this._stringifyToolPayload(block.input).slice(0, BLOCK_CHAR_CAP);
         parts.push(`[TOOL:${name}] ${inputText}`);
       } else if (block.type === 'tool_result') {
-        const resultText = this._stringifyToolPayload(block.content).slice(0, 2000);
+        const resultText = this._stringifyToolPayload(block.content).slice(0, BLOCK_CHAR_CAP);
         parts.push(`[TOOL_RESULT] ${resultText}`);
       }
     }
