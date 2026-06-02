@@ -538,8 +538,12 @@ class DatabaseManager {
     } catch (err) {
       console.error(chalk.red(`⚠️ FTS5 snippet search failed for query "${query}": ${err.message}`));
       console.error(chalk.gray('   Falling back to basic search without snippets.'));
-      // Fallback to basic search without snippets
-      return this.searchConversations(query, options);
+      // Fallback to basic search without snippets. Flag the result so callers
+      // (SearchService, REST) can surface degraded search instead of silently
+      // returning lower-quality results.
+      const fallback = this.searchConversations(query, options);
+      fallback._searchDegraded = true;
+      return fallback;
     }
   }
 

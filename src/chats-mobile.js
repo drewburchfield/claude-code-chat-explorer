@@ -341,8 +341,10 @@ class ChatsMobile {
 
         let results = [...this.data.conversations];
 
-        // Filter subagents unless explicitly included
-        if (!includeSubagents) {
+        // Filter subagents unless explicitly included. subagentsOnly also
+        // needs them kept in the first pass, otherwise the later intersection
+        // with the (subagent-only) FTS results would always be empty.
+        if (!includeSubagents && !subagentsOnly) {
           results = results.filter(c => !c.isSubagent);
         }
 
@@ -354,16 +356,17 @@ class ChatsMobile {
           });
         }
 
-        // Filter by date range
+        // Filter by date range on lastModified (last activity), matching the
+        // field SearchService filters on so REST and MCP stay consistent.
         if (dateFrom) {
           const fromDate = new Date(dateFrom);
-          results = results.filter(conv => new Date(conv.created) >= fromDate);
+          results = results.filter(conv => new Date(conv.lastModified) >= fromDate);
         }
 
         if (dateTo) {
           const toDate = new Date(dateTo);
           toDate.setHours(23, 59, 59, 999); // Include entire day
-          results = results.filter(conv => new Date(conv.created) <= toDate);
+          results = results.filter(conv => new Date(conv.lastModified) <= toDate);
         }
 
         // Filter by conversation metadata (filename, id)

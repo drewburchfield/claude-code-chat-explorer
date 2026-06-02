@@ -179,12 +179,16 @@ class DatabaseBackend {
     }
 
     const conversations = this.db.searchConversationsWithSnippets(query, options);
-    return conversations.map(conv => ({
+    const out = conversations.map(conv => ({
       ...this._transformConversation(conv),
       snippet: conv.snippet,
       searchTerm: conv.searchTerm,
       relevance: conv.relevance
     }));
+    // Propagate the degraded-search flag from the DB layer's fallback path so
+    // SearchService and the REST response can surface it.
+    if (conversations._searchDegraded) out._searchDegraded = true;
+    return out;
   }
 
   /**

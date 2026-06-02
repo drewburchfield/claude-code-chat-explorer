@@ -31,6 +31,13 @@ describe('SearchService REST surface', () => {
     await fs.writeFile(path.join(projB, 'b.jsonl'),
       session('b', 'claude-sonnet-4', 'the lazy dog sleeps').map(l => JSON.stringify(l)).join('\n') + '\n');
 
+    // A subagent conversation carrying a unique token, to exercise
+    // subagentsOnly + query (Devin finding: the intersection used to be empty).
+    const subDir = path.join(projA, 'parent-xyz', 'subagents');
+    await fs.ensureDir(subDir);
+    await fs.writeFile(path.join(subDir, 'agent-1.jsonl'),
+      session('s', 'claude-opus-4', 'subagentonlytoken explored the fox').map(l => JSON.stringify(l)).join('\n') + '\n');
+
     process.env.CLAUDE_DB_PATH = path.join(tempHome, 'conversations.db');
     app = new ChatsMobile({ port: 0, claudeDir, verbose: false });
     await app.initialize();
@@ -63,6 +70,13 @@ describe('SearchService REST surface', () => {
       .send({ contentSearch: 'the', project: 'a' }).expect(200);
     const ids = res.body.results.map(r => r.id);
     expect(ids).toEqual(['a']);
+  });
+
+  it('POST /api/search with subagentsOnly + a content query returns the subagent (not empty)', async () => {
+    const res = await request(app.app).post('/api/search')
+      .send({ contentSearch: 'subagentonlytoken', subagentsOnly: true }).expect(200);
+    expect(res.body.results.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.results.every(r => r.isSubagent)).toBe(true);
   });
 
   it('POST /api/search filters by model', async () => {
