@@ -44,3 +44,4 @@ temp/
 
 # Internal planning artifacts (superpowers skill)
 /docs/superpowers/
+.clawpatch/

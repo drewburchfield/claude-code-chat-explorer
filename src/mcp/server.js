@@ -54,8 +54,21 @@ function toolError(message) {
  * @param {Object} deps - { search: SearchService, db: DatabaseManager }
  * @returns {McpServer}
  */
-function buildServer({ search, db }) {
+function buildServer({ search, db, transcriptRoot = null }) {
   const server = new McpServer({ name: 'claude-chats-search', version: '1.0.0' });
+
+  // Transcript reads (resource + within-conversation) must stay under this
+  // root, so a poisoned/stale index row can't be used to read arbitrary files
+  // via a conversationId. Defaults to <CLAUDE_HOME>/projects.
+  const allowedRoot = path.resolve(
+    transcriptRoot ||
+    path.join(process.env.CLAUDE_HOME || path.join(os.homedir(), '.claude'), 'projects')
+  );
+  const isUnderRoot = (fp) => {
+    if (!fp) return false;
+    const resolved = path.resolve(fp);
+    return resolved === allowedRoot || resolved.startsWith(allowedRoot + path.sep);
+  };
 
   // ---- Tool: search_conversations -----------------------------------------
   server.registerTool(
@@ -176,6 +189,17 @@ function buildServer({ search, db }) {
       try {
         const conv = db.getConversation(args.conversationId);
         if (!conv) return toolError(`Conversation not found: ${args.conversationId}`);
+        if (!isUnderRoot(conv.filePath)) {
+          return toolError(`Refusing to read a transcript outside the configured root for ${args.conversationId}.`);
+        }
+        if (!fs.existsSync(conv.filePath)) {
+          // Mirror the resource handler: distinguish "file unreadable" from
+          // "no matches" so a missing transcript isn't reported as 0 matches.
+          return toolError(
+            `Transcript file unavailable for ${args.conversationId} (path: ${conv.filePath || 'none'}). ` +
+            `Ensure the MCP server can read the conversation JSONL files at their indexed paths.`
+          );
+        }
         const matches = searchWithinFile(conv.filePath, args.query, args.limit ?? 50);
         const structuredContent = { conversationId: args.conversationId, matches };
         return { structuredContent, content: [{ type: 'text', text: JSON.stringify(structuredContent) }] };
@@ -196,7 +220,10 @@ function buildServer({ search, db }) {
       if (!conv) {
         throw new Error(`Conversation not found: ${id}`);
       }
-      if (!conv.filePath || !fs.existsSync(conv.filePath)) {
+      if (!isUnderRoot(conv.filePath)) {
+        throw new Error(`Refusing to read a transcript outside the configured root for ${id}.`);
+      }
+      if (!fs.existsSync(conv.filePath)) {
         // The conversation is indexed but its transcript file isn't readable
         // from here. Usually means the server can't see ~/.claude/projects
         // (e.g. running in a container without it mounted at the indexed path).

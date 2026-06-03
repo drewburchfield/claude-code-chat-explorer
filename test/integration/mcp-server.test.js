@@ -6,7 +6,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 const path = require('path');
 const fs = require('fs-extra');
-const { createTestDatabase, createTempProjectsDir } = require('../helpers/test-db');
+const { createTestDatabase, createTempProjectsDir, createMockConversation } = require('../helpers/test-db');
 const Indexer = require('../../src/analytics/data/Indexer');
 const SearchService = require('../../src/analytics/search/SearchService');
 const { buildServer } = require('../../src/mcp/server');
@@ -34,7 +34,7 @@ describe('MCP server', () => {
     console.log = log;
     convId = db.getConversations({ includeSubagents: true })[0].id;
 
-    const server = buildServer({ search: new SearchService(db), db });
+    const server = buildServer({ search: new SearchService(db), db, transcriptRoot: projectsDir });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
     client = new Client({ name: 'test-client', version: '1.0.0' });
@@ -95,6 +95,19 @@ describe('MCP server', () => {
     expect(res.structuredContent.matches.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('refuses to read a transcript whose indexed path is outside the transcript root', async () => {
+    // Simulate a poisoned/stale index row pointing outside the projects root.
+    db.upsertConversation(createMockConversation({ id: 'evil', filePath: '/etc/passwd' }), 'x');
+    await expect(
+      client.readResource({ uri: 'claude-chat://conversation/evil' })
+    ).rejects.toThrow(/outside the configured root/);
+    const within = await client.callTool({
+      name: 'search_within_conversation',
+      arguments: { conversationId: 'evil', query: 'root' },
+    });
+    expect(within.isError).toBe(true);
+  });
+
   it('returns a tool error for an unknown conversation', async () => {
     const res = await client.callTool({
       name: 'search_within_conversation',
@@ -119,5 +132,13 @@ describe('MCP server', () => {
     await expect(
       client.readResource({ uri: `claude-chat://conversation/${encodeURIComponent(goneId)}` })
     ).rejects.toThrow(/Transcript file unavailable/);
+
+    // search_within_conversation must also error (not return empty matches)
+    // when the transcript file is gone — consistent with the resource handler.
+    const within = await client.callTool({
+      name: 'search_within_conversation',
+      arguments: { conversationId: goneId, query: 'GONETOKEN' },
+    });
+    expect(within.isError).toBe(true);
   });
 });

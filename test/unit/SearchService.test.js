@@ -66,6 +66,18 @@ describe('SearchService', () => {
     expect(total).toBe(3);
   });
 
+  it('supports prefix search through real FTS', () => {
+    // 'quick' (c1) and 'quickly' (c2) both match a quick* prefix.
+    const ids = svc.search({ query: 'quick*', includeSubagents: true }).results.map(r => r.id).sort();
+    expect(ids).toEqual(['c1', 'c2']);
+  });
+
+  it('supports NOT through real FTS', () => {
+    // fox is in c1 and c3; dog is in c2 — "fox NOT dog" excludes nothing extra here.
+    const ids = svc.search({ query: 'fox NOT dog', includeSubagents: true }).results.map(r => r.id).sort();
+    expect(ids).toEqual(['c1', 'c3']);
+  });
+
   it('paginates', () => {
     const page1 = svc.search({ query: 'the', includeSubagents: true, limit: 1, offset: 0 });
     const page2 = svc.search({ query: 'the', includeSubagents: true, limit: 1, offset: 1 });
@@ -86,5 +98,30 @@ describe('SearchService', () => {
     expect(f.models.sort()).toEqual(['opus', 'sonnet']);
     expect(f.dateRange.min).toBe(1000);
     expect(f.dateRange.max).toBe(3000);
+  });
+});
+
+describe('SearchService degraded propagation', () => {
+  // The degraded flag is set on the DB-layer candidate array; SearchService
+  // must surface it as a top-level field. (Regression: it was dropped before.)
+  function degradedArray() { const a = []; a._searchDegraded = true; return a; }
+
+  it('surfaces degraded from the FTS candidate array', () => {
+    const stub = {
+      searchConversationsWithSnippets: () => degradedArray(),
+      getConversations: () => [],
+      getSearchFacets: () => ({}),
+    };
+    expect(new SearchService(stub).search({ query: 'x' }).degraded).toBe(true);
+  });
+
+  it('surfaces degraded from the role-search candidate array', () => {
+    const stub = {
+      searchConversationsByRole: () => degradedArray(),
+      searchConversationsWithSnippets: () => [],
+      getConversations: () => [],
+      getSearchFacets: () => ({}),
+    };
+    expect(new SearchService(stub).search({ query: 'x', role: 'user' }).degraded).toBe(true);
   });
 });

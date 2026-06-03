@@ -533,9 +533,13 @@ class DatabaseManager {
       }));
     } catch (err) {
       console.error(chalk.red(`⚠️ FTS5 search failed for query "${query}": ${err.message}`));
-      console.error(chalk.gray('   Falling back to basic search. FTS index may need rebuilding.'));
-      // Fallback to basic LIKE search
-      return this.getConversations(options);
+      console.error(chalk.gray('   FTS index may need rebuilding; returning no results (degraded).'));
+      // Do NOT fall back to returning the entire corpus — that presents every
+      // conversation as a "match". Return empty, flagged degraded, so callers
+      // can surface "search degraded" instead of a misleading full dump.
+      const degradedEmpty = [];
+      degradedEmpty._searchDegraded = true;
+      return degradedEmpty;
     }
   }
 
@@ -658,9 +662,13 @@ class DatabaseManager {
       }));
     } catch (err) {
       console.error(chalk.red(`⚠️ Role search failed for query "${query}": ${err.message}`));
-      const fallback = this.searchConversationsWithSnippets(query, options);
-      fallback._searchDegraded = true;
-      return fallback;
+      // Do NOT fall back to conversation_fts here: it ignores role/tool and
+      // would return cross-role matches under a role-scoped query, while the
+      // caller still reports the filter as applied. Return empty + degraded so
+      // the role/tool scope is never silently violated.
+      const degradedEmpty = [];
+      degradedEmpty._searchDegraded = true;
+      return degradedEmpty;
     }
   }
 
