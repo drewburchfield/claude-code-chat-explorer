@@ -22,5 +22,11 @@ Re-baselined below 1.0 to reflect pre-1.0 maturity. Search, multi-surface exposu
 - Resolved moderate npm advisories (qs / express / ws) via `npm audit fix`.
 - npm installs in CI and the Docker image build are checked against Aikido safe-chain.
 
+### Review hardening (post-review, same release)
+- Degraded-search signal now actually reaches the REST response (it was read off the wrong object and always came back `false`); `/api/search` also reports `indexState`.
+- FTS-failure fallbacks no longer mislead: `searchConversations` returns empty+degraded instead of the entire corpus, and role/tool search returns empty+degraded instead of cross-role matches that ignore the filter.
+- MCP `search_within_conversation` errors (instead of returning empty) when a transcript file is unreadable.
+- MCP transcript reads are restricted to the configured root (`<CLAUDE_HOME>/projects`): a poisoned/stale index row can't be used to read files outside it.
+
 ### Notes
 - The per-message index increases on-disk size; plan for a few GB on large histories. Consolidation to reclaim this is tracked for a later release.
