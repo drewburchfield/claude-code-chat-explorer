@@ -346,6 +346,8 @@ class ChatsMobile {
         let results = (needSubagents && this.useDatabaseBackend && this.databaseBackend.isInitialized)
           ? this.databaseBackend.getConversations({ includeSubagents: true })
           : [...this.data.conversations];
+        // Surfaced in the response so a silent FTS fallback doesn't read as a clean success.
+        let degraded = false;
 
         // Filter subagents unless explicitly included. subagentsOnly also
         // needs them kept in the first pass, otherwise the later intersection
@@ -403,7 +405,7 @@ class ChatsMobile {
         // SearchService so REST and MCP cannot diverge in capability.
         if (contentSearch && contentSearch.trim()) {
           if (this.useDatabaseBackend && this.databaseBackend.isInitialized) {
-            const ftsResults = this.databaseBackend.search({
+            const searchResult = this.databaseBackend.search({
               query: contentSearch,
               includeSubagents,
               subagentsOnly,
@@ -412,7 +414,11 @@ class ChatsMobile {
               role,
               tool,
               limit: 100
-            }).results;
+            });
+            const ftsResults = searchResult.results;
+            // SearchService reports degraded as a top-level field; carry it
+            // through to the response so a silent FTS fallback is surfaced.
+            if (searchResult.degraded) degraded = true;
 
             // If we had other filters applied, intersect with FTS results
             if (workingDirectory || dateFrom || dateTo || query) {
@@ -428,8 +434,7 @@ class ChatsMobile {
               const searchableText = [conv.project, conv.filename, conv.id].filter(Boolean).join(' ').toLowerCase();
               return searchableText.includes(contentSearch.toLowerCase());
             });
-            // Flag degraded search mode in results
-            results._searchDegraded = true;
+            degraded = true;
           }
         }
 
@@ -452,7 +457,10 @@ class ChatsMobile {
             contentSearch,
             includeSubagents
           },
-          searchDegraded: !!results._searchDegraded,
+          searchDegraded: degraded || !!results._searchDegraded,
+          indexState: (this.useDatabaseBackend && this.databaseBackend?.getIndexStatus)
+            ? this.databaseBackend.getIndexStatus().state
+            : null,
           timestamp: new Date().toISOString()
         });
       } catch (error) {
@@ -468,7 +476,7 @@ class ChatsMobile {
         if (this.useDatabaseBackend && this.databaseBackend.isInitialized) {
           return res.json(this.databaseBackend.facets());
         }
-        res.json({ projects: [], models: [], tools: [], dateRange: { min: null, max: null } });
+        res.json({ projects: [], models: [], tools: [], roles: ['user', 'assistant', 'system', 'tool'], dateRange: { min: null, max: null } });
       } catch (error) {
         console.error('Error serving facets:', error);
         res.status(500).json({ error: 'Internal server error' });

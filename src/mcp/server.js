@@ -176,6 +176,14 @@ function buildServer({ search, db }) {
       try {
         const conv = db.getConversation(args.conversationId);
         if (!conv) return toolError(`Conversation not found: ${args.conversationId}`);
+        if (!conv.filePath || !fs.existsSync(conv.filePath)) {
+          // Mirror the resource handler: distinguish "file unreadable" from
+          // "no matches" so a missing transcript isn't reported as 0 matches.
+          return toolError(
+            `Transcript file unavailable for ${args.conversationId} (path: ${conv.filePath || 'none'}). ` +
+            `Ensure the MCP server can read the conversation JSONL files at their indexed paths.`
+          );
+        }
         const matches = searchWithinFile(conv.filePath, args.query, args.limit ?? 50);
         const structuredContent = { conversationId: args.conversationId, matches };
         return { structuredContent, content: [{ type: 'text', text: JSON.stringify(structuredContent) }] };

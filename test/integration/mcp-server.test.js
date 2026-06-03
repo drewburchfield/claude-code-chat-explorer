@@ -119,5 +119,13 @@ describe('MCP server', () => {
     await expect(
       client.readResource({ uri: `claude-chat://conversation/${encodeURIComponent(goneId)}` })
     ).rejects.toThrow(/Transcript file unavailable/);
+
+    // search_within_conversation must also error (not return empty matches)
+    // when the transcript file is gone — consistent with the resource handler.
+    const within = await client.callTool({
+      name: 'search_within_conversation',
+      arguments: { conversationId: goneId, query: 'GONETOKEN' },
+    });
+    expect(within.isError).toBe(true);
   });
 });
