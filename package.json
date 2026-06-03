@@ -1,6 +1,6 @@
 {
   "name": "claude-code-chat-explorer",
-  "version": "1.0.0",
+  "version": "0.9.0",
   "description": "Browse, search, and explore your Claude Code conversation history with a fast SQLite-powered web interface",
   "license": "MIT",
   "private": true,
@@ -46,6 +46,6 @@
     "vitest": "^4.1.5"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20 <26"
   }
 }
