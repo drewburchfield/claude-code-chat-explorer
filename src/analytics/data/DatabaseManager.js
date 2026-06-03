@@ -103,6 +103,21 @@ class DatabaseManager {
         )
       `);
 
+      // Per-message FTS for role/tool-granular search (Phase 5). One row per
+      // message; role/tool_name/seq are UNINDEXED (filterable + returnable but
+      // not tokenized). Lives alongside conversation_fts: default search uses
+      // conversation_fts (no blackout), role-filtered search uses this.
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(
+          conversation_id UNINDEXED,
+          seq UNINDEXED,
+          role UNINDEXED,
+          tool_name UNINDEXED,
+          content,
+          tokenize='unicode61 remove_diacritics 2'
+        )
+      `);
+
       // File tracking table - for incremental indexing
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS file_index (
@@ -154,10 +169,11 @@ class DatabaseManager {
    *   2 = recall parity: `[THINKING]`/`[SYSTEM]`/`[SUMMARY]` content,
    *       per-block cap raised to 256KB, per-message/per-conversation
    *       truncation removed
+   *   3 = per-message FTS (message_fts) for role/tool-granular search
    * @private
    */
   _migrateFtsContentVersion() {
-    const TARGET_VERSION = 2;
+    const TARGET_VERSION = 3;
     try {
       const current = this.db.pragma('user_version', { simple: true });
       if (current >= TARGET_VERSION) return;
@@ -312,8 +328,11 @@ class DatabaseManager {
    * Insert or update a conversation in the database
    * @param {Object} conversation - Conversation data object
    * @param {string} searchableContent - Text content for FTS indexing
+   * @param {Array<{seq:number, role:string, tool_name:?string, text:string}>} [messages]
+   *   Per-message records for role/tool-granular FTS (message_fts). Optional;
+   *   when omitted, only conversation_fts is written (role search won't match).
    */
-  upsertConversation(conversation, searchableContent) {
+  upsertConversation(conversation, searchableContent, messages = []) {
     const now = Date.now();
 
     // Begin transaction for atomicity
@@ -332,6 +351,15 @@ class DatabaseManager {
     const insertFts = this.db.prepare(`
       INSERT INTO conversation_fts (conversation_id, content, project)
       VALUES (?, ?, ?)
+    `);
+
+    const deleteOldMsgFts = this.db.prepare(`
+      DELETE FROM message_fts WHERE conversation_id = ?
+    `);
+
+    const insertMsgFts = this.db.prepare(`
+      INSERT INTO message_fts (conversation_id, seq, role, tool_name, content)
+      VALUES (?, ?, ?, ?, ?)
     `);
 
     const updateFileIndex = this.db.prepare(`
@@ -369,10 +397,18 @@ class DatabaseManager {
         conversation.cwd || null
       );
 
-      // Update FTS index
+      // Update conversation-level FTS index
       deleteOldFts.run(conversation.id);
       if (searchableContent && searchableContent.trim()) {
         insertFts.run(conversation.id, searchableContent, conversation.project || '');
+      }
+
+      // Update per-message FTS index (role/tool-granular)
+      deleteOldMsgFts.run(conversation.id);
+      for (const m of (messages || [])) {
+        if (m && typeof m.text === 'string' && m.text.trim()) {
+          insertMsgFts.run(conversation.id, m.seq ?? 0, m.role || 'unknown', m.tool_name || null, m.text);
+        }
       }
 
       // Update file tracking
@@ -560,6 +596,75 @@ class DatabaseManager {
   }
 
   /**
+   * Role/tool-granular search over message_fts. Returns one conversation per
+   * match (the best-matching message's snippet), optionally restricted to
+   * messages of a given role (user/assistant/system/tool) and/or tool name.
+   * @param {string} query
+   * @param {Object} options - { role, tool, limit, offset, includeSubagents }
+   * @returns {Array} conversations with snippet, relevance, matchedRole, matchedSeq
+   */
+  searchConversationsByRole(query, options = {}) {
+    const { role = null, tool = null, limit = 50, offset = 0, includeSubagents = false } = options;
+    if (!query || !query.trim()) return [];
+
+    try {
+      const subagentFilter = includeSubagents ? '' : 'AND (c.is_subagent = 0 OR c.is_subagent IS NULL)';
+      const roleClause = role ? 'AND message_fts.role = ?' : '';
+      const toolClause = tool ? 'AND message_fts.tool_name = ?' : '';
+
+      // Flat MATCH query (the context where bm25()/snippet() are valid),
+      // ordered by relevance. A conversation can have many matching messages,
+      // so we fetch a generous, relevance-ordered window and dedupe to the
+      // best message per conversation in JS.
+      const FETCH_CAP = 5000;
+      const stmt = this.db.prepare(`
+        SELECT
+          c.id, c.file_path, c.filename, c.project, c.message_count, c.file_size,
+          c.last_modified, c.created, c.tokens_total, c.tokens_input, c.tokens_output,
+          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id,
+          bm25(message_fts) AS relevance,
+          snippet(message_fts, 4, '{{MATCH}}', '{{/MATCH}}', '...', 20) AS snippet,
+          message_fts.role AS matched_role, message_fts.seq AS matched_seq
+        FROM message_fts
+        JOIN conversations c ON message_fts.conversation_id = c.id
+        WHERE message_fts MATCH ? ${roleClause} ${toolClause} ${subagentFilter}
+        ORDER BY relevance
+        LIMIT ?
+      `);
+
+      const params = [this._escapeFtsQuery(query)];
+      if (role) params.push(role);
+      if (tool) params.push(tool);
+      params.push(FETCH_CAP);
+
+      const rows = stmt.all(...params);
+
+      // Dedupe to the best (first, since relevance-ordered) message per conversation.
+      const seen = new Set();
+      const deduped = [];
+      for (const row of rows) {
+        if (seen.has(row.id)) continue;
+        seen.add(row.id);
+        deduped.push(row);
+      }
+
+      return deduped.slice(offset, offset + limit).map(row => ({
+        ...this._rowToConversation(row),
+        relevance: row.relevance,
+        snippet: row.snippet,
+        matchedRole: row.matched_role,
+        matchedSeq: row.matched_seq,
+        searchTerm: query
+      }));
+    } catch (err) {
+      console.error(chalk.red(`⚠️ Role search failed for query "${query}": ${err.message}`));
+      const fallback = this.searchConversationsWithSnippets(query, options);
+      fallback._searchDegraded = true;
+      return fallback;
+    }
+  }
+
+  /**
    * Get conversation by ID
    * @param {string} id - Conversation ID
    * @returns {Object|null} Conversation object or null
@@ -620,7 +725,9 @@ class DatabaseManager {
     const range = this.db.prepare(
       `SELECT MIN(last_modified) as min, MAX(last_modified) as max FROM conversations`
     ).get();
-    return { projects, models, tools, dateRange: { min: range.min ?? null, max: range.max ?? null } };
+    // Roles are a fixed enum produced by the indexer (per-message FTS).
+    const roles = ['user', 'assistant', 'system', 'tool'];
+    return { projects, models, tools, roles, dateRange: { min: range.min ?? null, max: range.max ?? null } };
   }
 
   /**
@@ -674,6 +781,7 @@ class DatabaseManager {
   removeConversation(id) {
     const transaction = this.db.transaction(() => {
       this.db.prepare('DELETE FROM conversation_fts WHERE conversation_id = ?').run(id);
+      this.db.prepare('DELETE FROM message_fts WHERE conversation_id = ?').run(id);
       this.db.prepare('DELETE FROM tool_usage WHERE conversation_id = ?').run(id);
       this.db.prepare('DELETE FROM conversations WHERE id = ?').run(id);
     });
@@ -699,6 +807,7 @@ class DatabaseManager {
 
         // Inline the deletion to keep it atomic
         this.db.prepare('DELETE FROM conversation_fts WHERE conversation_id = ?').run(conv.id);
+        this.db.prepare('DELETE FROM message_fts WHERE conversation_id = ?').run(conv.id);
         this.db.prepare('DELETE FROM tool_usage WHERE conversation_id = ?').run(conv.id);
         this.db.prepare('DELETE FROM conversations WHERE id = ?').run(conv.id);
       }

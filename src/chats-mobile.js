@@ -337,7 +337,7 @@ class ChatsMobile {
     // API to search conversations with advanced filters
     this.app.post('/api/search', async (req, res) => {
       try {
-        const { query, workingDirectory, dateFrom, dateTo, contentSearch, includeSubagents = false, project = null, model = null, subagentsOnly = false } = req.body;
+        const { query, workingDirectory, dateFrom, dateTo, contentSearch, includeSubagents = false, project = null, model = null, subagentsOnly = false, role = null, tool = null } = req.body;
 
         // The in-memory snapshot excludes subagents (they're grouped under
         // parents), so when subagents are requested, source the base set from
@@ -409,6 +409,8 @@ class ChatsMobile {
               subagentsOnly,
               project,
               model,
+              role,
+              tool,
               limit: 100
             }).results;
 

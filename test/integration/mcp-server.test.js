@@ -67,6 +67,14 @@ describe('MCP server', () => {
     expect(link.mimeType).toBe(read.contents[0].mimeType);
   });
 
+  it('search_conversations supports a role filter (per-message granularity)', async () => {
+    // MCPUNIQUETOKEN is in the USER message; assistant said only 'done'.
+    const asUser = await client.callTool({ name: 'search_conversations', arguments: { query: 'MCPUNIQUETOKEN', role: 'user' } });
+    expect(asUser.structuredContent.total).toBeGreaterThanOrEqual(1);
+    const asAssistant = await client.callTool({ name: 'search_conversations', arguments: { query: 'MCPUNIQUETOKEN', role: 'assistant' } });
+    expect(asAssistant.structuredContent.total).toBe(0);
+  });
+
   it('list_facets returns structured facets', async () => {
     const res = await client.callTool({ name: 'list_facets', arguments: {} });
     expect(res.structuredContent).toHaveProperty('projects');
@@ -93,5 +101,23 @@ describe('MCP server', () => {
       arguments: { conversationId: 'does-not-exist', query: 'x' },
     });
     expect(res.isError).toBe(true);
+  });
+
+  it('reading a resource whose transcript file is gone gives a clear error', async () => {
+    // Index a second conversation, then delete its file on disk.
+    const dir2 = path.join(projectsDir, '-gone');
+    await fs.ensureDir(dir2);
+    const f2 = path.join(dir2, 'gone.jsonl');
+    await fs.writeFile(f2, JSON.stringify({ type: 'user', message: { role: 'user', content: 'GONETOKEN' }, cwd: '/gone' }) + '\n');
+    const indexer = new Indexer(db, claudeDir);
+    const log = console.log; console.log = () => {};
+    await indexer.runFullIndex();
+    console.log = log;
+    const goneId = db.getConversations({ includeSubagents: true }).find(c => c.filePath === f2).id;
+    await fs.remove(f2);
+
+    await expect(
+      client.readResource({ uri: `claude-chat://conversation/${encodeURIComponent(goneId)}` })
+    ).rejects.toThrow(/Transcript file unavailable/);
   });
 });

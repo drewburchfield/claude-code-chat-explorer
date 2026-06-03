@@ -607,8 +607,8 @@ describe('DatabaseManager', () => {
   });
 
   describe('FTS content version migration', () => {
-    it('initializes a fresh database at the current target version (2)', () => {
-      expect(db.db.pragma('user_version', { simple: true })).toBe(2);
+    it('initializes a fresh database at the current target version (3)', () => {
+      expect(db.db.pragma('user_version', { simple: true })).toBe(3);
     });
 
     it('clears file_index and bumps version, but preserves FTS for graceful degradation', () => {
@@ -624,7 +624,7 @@ describe('DatabaseManager', () => {
       // Re-run the migration as a fresh startup would.
       db._migrateFtsContentVersion();
 
-      expect(db.db.pragma('user_version', { simple: true })).toBe(2);
+      expect(db.db.pragma('user_version', { simple: true })).toBe(3);
       // file_index is cleared so every file is reprocessed...
       expect(db.db.prepare(`SELECT COUNT(*) c FROM file_index`).get().c).toBe(0);
       // ...but the existing FTS rows are kept so search keeps working while

@@ -70,6 +70,8 @@ function buildServer({ search, db }) {
         query: z.string().describe('Search text; FTS operators supported'),
         project: z.string().optional().describe('Exact project name filter'),
         model: z.string().optional().describe('Exact primary model filter'),
+        role: z.enum(['user', 'assistant', 'system', 'tool']).optional().describe('Match only within messages of this role'),
+        tool: z.string().optional().describe('Match only within a specific tool\'s calls (role=tool)'),
         includeSubagents: z.boolean().optional().describe('Include subagent conversations (default true here)'),
         subagentsOnly: z.boolean().optional().describe('Restrict to subagent conversations'),
         limit: z.number().int().min(1).max(200).optional(),
@@ -98,6 +100,8 @@ function buildServer({ search, db }) {
           query: args.query,
           project: args.project ?? null,
           model: args.model ?? null,
+          role: args.role ?? null,
+          tool: args.tool ?? null,
           includeSubagents: args.includeSubagents !== false, // default true for agent use
           subagentsOnly: args.subagentsOnly === true,
           limit: args.limit ?? 25,
@@ -138,6 +142,7 @@ function buildServer({ search, db }) {
         projects: z.array(z.string()),
         models: z.array(z.string()),
         tools: z.array(z.string()),
+        roles: z.array(z.string()),
         dateRange: z.object({ min: z.number().nullable(), max: z.number().nullable() }),
       },
     },
@@ -188,8 +193,17 @@ function buildServer({ search, db }) {
     async (uri, variables) => {
       const id = decodeURIComponent(variables.id);
       const conv = db.getConversation(id);
-      if (!conv || !conv.filePath || !fs.existsSync(conv.filePath)) {
+      if (!conv) {
         throw new Error(`Conversation not found: ${id}`);
+      }
+      if (!conv.filePath || !fs.existsSync(conv.filePath)) {
+        // The conversation is indexed but its transcript file isn't readable
+        // from here. Usually means the server can't see ~/.claude/projects
+        // (e.g. running in a container without it mounted at the indexed path).
+        throw new Error(
+          `Transcript file unavailable for ${id} (path: ${conv.filePath || 'none'}). ` +
+          `Ensure the MCP server can read the conversation JSONL files at their indexed paths.`
+        );
       }
       const text = fs.readFileSync(conv.filePath, 'utf8');
       return { contents: [{ uri: uri.href, mimeType: 'application/x-ndjson', text }] };

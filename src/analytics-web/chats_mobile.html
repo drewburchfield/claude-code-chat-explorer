@@ -2352,6 +2352,16 @@
                         </select>
                     </div>
 
+                    <div class="search-filter-group">
+                        <label class="search-filter-label">Message role</label>
+                        <select class="search-filter-input" id="filterRole">
+                            <option value="">Any role</option>
+                        </select>
+                        <small style="color: var(--text-secondary); font-size: 0.75rem; margin-top: 6px; display: block; opacity: 0.8;">
+                            Match only within user / assistant / system / tool messages (needs a content search)
+                        </small>
+                    </div>
+
                     <!-- Subagent controls -->
                     <div class="search-filter-group">
                         <label class="search-filter-label">Subagents</label>
@@ -4407,6 +4417,7 @@
                         contentSearch: document.getElementById('filterContentSearch').value.trim(),
                         project: document.getElementById('filterProject')?.value || '',
                         model: document.getElementById('filterModel')?.value || '',
+                        role: document.getElementById('filterRole')?.value || '',
                         // Subagents-only implies including them in the candidate set.
                         includeSubagents: (document.getElementById('filterIncludeSubagents')?.checked || false) || subagentsOnly,
                         subagentsOnly
@@ -4605,6 +4616,7 @@
                     };
                     fill('filterProject', facets.projects, 'All projects');
                     fill('filterModel', facets.models, 'All models');
+                    fill('filterRole', facets.roles, 'Any role');
                 } catch (error) {
                     console.error('Error loading facets:', error);
                 }
@@ -5012,6 +5024,7 @@
                 document.getElementById('filterContentSearch').value = '';
                 const proj = document.getElementById('filterProject'); if (proj) proj.value = '';
                 const model = document.getElementById('filterModel'); if (model) model.value = '';
+                const role = document.getElementById('filterRole'); if (role) role.value = '';
                 const incSub = document.getElementById('filterIncludeSubagents'); if (incSub) incSub.checked = false;
                 const subOnly = document.getElementById('filterSubagentsOnly'); if (subOnly) subOnly.checked = false;
             }
