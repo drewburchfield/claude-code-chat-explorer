@@ -38,7 +38,10 @@ Open **http://localhost:9876** in your browser.
 
 ### Browse & Search
 - **Project view** - Conversations organized by project directory
-- **Full-text search** - Fast FTS5-powered search with highlighted snippets
+- **Full-text search** - FTS5-powered search with highlighted snippets, indexing message text, thinking blocks, tool inputs/results, and system content (matches what's on disk)
+- **Query operators** - `AND` / `OR` / `NOT`, `"exact phrase"`, and `prefix*`
+- **Filters** - Narrow by project, model, date range, and subagents; facet values come from `GET /api/facets`
+- **Role/tool filtering** - Restrict matches to a message role (user / assistant / system / tool) or a specific tool
 - **Session details** - See token counts, models used, and activity timelines
 
 ### Conversation Viewer
@@ -52,10 +55,33 @@ Open **http://localhost:9876** in your browser.
 - **Activity indicators** - See which sessions are active
 - **Subagent tracking** - View spawned Task tool agents grouped under parents
 
+## MCP Server
+
+An MCP server exposes the same search to MCP clients (e.g. Claude Code), so an agent can query your past conversations directly. It reads the same SQLite index read-only and serves search through the same code path as the web UI.
+
+Tools: `search_conversations` (FTS operators + project/model/role/tool filters; returns ranked hits with snippets and a resource link per hit), `search_within_conversation`, and `list_facets`. Conversations are exposed as resources at `claude-chat://conversation/{id}`.
+
+Run it with `npm run mcp` (or the `claude-chats-mcp` bin). Add to Claude Code via `.mcp.json` (see `.mcp.json.example`):
+
+```json
+{
+  "mcpServers": {
+    "claude-chats-search": {
+      "command": "node",
+      "args": ["/absolute/path/to/claude-code-chat-explorer/src/mcp/server.js"],
+      "env": { "CLAUDE_DB_PATH": "/absolute/path/to/conversations.db" }
+    }
+  }
+}
+```
+
+The server needs read access to the conversation JSONL files at their indexed paths (run it on the host, or mount `~/.claude` if containerized). See `docs/MCP.md` for details.
+
 ## Requirements
 
-- Docker and Docker Compose
+- Docker and Docker Compose (the container bundles a supported Node runtime)
 - Claude Code installed (with conversations in `~/.claude`)
+- For local (non-Docker) development: Node 20–25 (`better-sqlite3` does not support Node 18 or 26+)
 
 ## How It Works
 
@@ -145,6 +171,10 @@ docker compose up -d --build
 docker compose down -v
 docker compose up -d --build
 ```
+
+## Upgrading
+
+When the index format changes between versions, the app does a one-time full re-index on next start. It runs in the **background** — the server starts serving immediately and existing results stay searchable while the new index builds (large histories can take several minutes). Indexing now stores per-message content for role/tool-granular search, so the on-disk index is larger than in earlier versions; plan for a few GB on large histories.
 
 ## Security
 
