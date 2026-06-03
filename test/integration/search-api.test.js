@@ -93,6 +93,19 @@ describe('SearchService REST surface', () => {
     expect(res.body.results.every(r => r.isSubagent)).toBe(true);
   });
 
+  it('POST /api/search role=user finds a user-message term; role=assistant does not', async () => {
+    // 'fox' is in conversation a's USER message; assistant said only 'ok'.
+    const u = await request(app.app).post('/api/search').send({ contentSearch: 'fox', role: 'user' }).expect(200);
+    expect(u.body.results.map(r => r.id)).toContain('a');
+    const a = await request(app.app).post('/api/search').send({ contentSearch: 'fox', role: 'assistant' }).expect(200);
+    expect(a.body.results.map(r => r.id)).not.toContain('a');
+  });
+
+  it('GET /api/facets includes the role enum', async () => {
+    const res = await request(app.app).get('/api/facets').expect(200);
+    expect(res.body.roles).toEqual(expect.arrayContaining(['user', 'assistant', 'system', 'tool']));
+  });
+
   it('POST /api/search filters by model', async () => {
     const res = await request(app.app).post('/api/search')
       .send({ contentSearch: 'the', model: 'claude-sonnet-4' }).expect(200);

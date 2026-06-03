@@ -193,7 +193,7 @@ class Indexer {
     };
 
     // Insert into database
-    this.db.upsertConversation(conversation, parseResult.searchableContent);
+    this.db.upsertConversation(conversation, parseResult.searchableContent, parseResult.messages);
   }
 
   /**
@@ -208,10 +208,13 @@ class Indexer {
         modelInfo: { primaryModel: null, models: {} },
         toolUsage: { total: 0, tools: {} },
         searchableContent: '',
+        messages: [],   // per-message records for role/tool-granular FTS
         cwd: null  // Extract working directory for project name
       };
 
       const contentParts = [];
+      const messageRecords = [];
+      let msgSeq = 0;
       const modelCounts = {};
       let lineCount = 0;
       let parseErrorCount = 0;
@@ -258,6 +261,12 @@ class Indexer {
               contentParts.push(content);
             }
 
+            // Per-message records (role/tool-granular). text+thinking under the
+            // message's own role; tool_use/tool_result as separate 'tool' rows.
+            for (const rec of this._extractMessageRecords(item.message.content, item.type)) {
+              messageRecords.push({ seq: msgSeq++, ...rec });
+            }
+
             // Track token usage from assistant messages
             if (item.type === 'assistant' && item.message.usage) {
               const usage = item.message.usage;
@@ -285,18 +294,24 @@ class Indexer {
             // that grep finds on disk. Index them so search matches; they are
             // not counted as messages.
             contentParts.push(`[SYSTEM] ${item.content}`);
+            messageRecords.push({ seq: msgSeq++, role: 'system', tool_name: null, text: `[SYSTEM] ${item.content}` });
           } else if (item.type === 'summary' && typeof item.summary === 'string') {
             // Compaction summary entries that prefix resumed sessions.
             contentParts.push(`[SUMMARY] ${item.summary}`);
+            messageRecords.push({ seq: msgSeq++, role: 'system', tool_name: null, text: `[SUMMARY] ${item.summary}` });
           } else if (item.type === 'queue-operation' && typeof item.content === 'string') {
             // Queued user messages (top-level string content) are genuine
             // user-authored text that should be searchable.
             contentParts.push(`[QUEUED] ${item.content}`);
+            messageRecords.push({ seq: msgSeq++, role: 'user', tool_name: null, text: `[QUEUED] ${item.content}` });
           } else if (item.type === 'attachment' && item.attachment) {
             // Pasted/attached payloads (e.g. file diffs, edited text) carry
             // real content the user pasted in. Index the payload text.
             const attachText = this._stringifyToolPayload(item.attachment).slice(0, BLOCK_CHAR_CAP);
-            if (attachText) contentParts.push(`[ATTACHMENT] ${attachText}`);
+            if (attachText) {
+              contentParts.push(`[ATTACHMENT] ${attachText}`);
+              messageRecords.push({ seq: msgSeq++, role: 'user', tool_name: null, text: `[ATTACHMENT] ${attachText}` });
+            }
           }
         } catch (parseErr) {
           // Log parse errors with context (limit to avoid spam)
@@ -326,6 +341,7 @@ class Indexer {
         // Join searchable content. No total-size cap: the index mirrors the
         // on-disk text. Per-block 256KB ceiling still guards pathological blobs.
         result.searchableContent = contentParts.join('\n');
+        result.messages = messageRecords;
 
         resolve(result);
       });
@@ -395,6 +411,45 @@ class Indexer {
     }
 
     return parts.join('\n');
+  }
+
+  /**
+   * Extract per-message records for role/tool-granular FTS. Text and thinking
+   * blocks become one record under the message's own role (`baseRole`); each
+   * tool_use / tool_result block becomes a separate `tool` record (with
+   * tool_name for tool_use). Mirrors _extractTextContent's content selection.
+   * @param {*} content - message content (string or block array)
+   * @param {string} baseRole - 'user' | 'assistant'
+   * @returns {Array<{role:string, tool_name:?string, text:string}>}
+   * @private
+   */
+  _extractMessageRecords(content, baseRole) {
+    if (!content) return [];
+    if (typeof content === 'string') {
+      return content.trim() ? [{ role: baseRole, tool_name: null, text: content }] : [];
+    }
+    const blocks = Array.isArray(content) ? content : [content];
+    const records = [];
+    const textParts = [];
+    for (const block of blocks) {
+      if (!block || typeof block !== 'object') continue;
+      if (block.type === 'text' && block.text) {
+        textParts.push(block.text);
+      } else if (block.type === 'thinking' && block.thinking) {
+        textParts.push(`[THINKING] ${block.thinking}`);
+      } else if (block.type === 'tool_use') {
+        const name = block.name || 'unknown';
+        const inputText = this._stringifyToolPayload(block.input).slice(0, BLOCK_CHAR_CAP);
+        records.push({ role: 'tool', tool_name: name, text: `[TOOL:${name}] ${inputText}` });
+      } else if (block.type === 'tool_result') {
+        const resultText = this._stringifyToolPayload(block.content).slice(0, BLOCK_CHAR_CAP);
+        records.push({ role: 'tool', tool_name: null, text: `[TOOL_RESULT] ${resultText}` });
+      }
+    }
+    if (textParts.length) {
+      records.unshift({ role: baseRole, tool_name: null, text: textParts.join('\n') });
+    }
+    return records;
   }
 
   /**

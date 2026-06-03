@@ -221,6 +221,28 @@ class DatabaseBackend {
   }
 
   /**
+   * Role/tool-granular search (message_fts). Same transformed shape as
+   * searchConversationsWithSnippets, plus matchedRole/matchedSeq.
+   * @param {string} query
+   * @param {Object} options - { role, tool, limit, offset, includeSubagents }
+   * @returns {Array}
+   */
+  searchConversationsByRole(query, options = {}) {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db.searchConversationsByRole(query, options);
+    const out = rows.map(conv => ({
+      ...this._transformConversation(conv),
+      snippet: conv.snippet,
+      searchTerm: conv.searchTerm,
+      relevance: conv.relevance,
+      matchedRole: conv.matchedRole,
+      matchedSeq: conv.matchedSeq
+    }));
+    if (rows._searchDegraded) out._searchDegraded = true;
+    return out;
+  }
+
+  /**
    * Get a specific conversation by ID
    * @param {string} id - Conversation ID
    * @returns {Object|null} Conversation object

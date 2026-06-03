@@ -67,6 +67,14 @@ describe('MCP server', () => {
     expect(link.mimeType).toBe(read.contents[0].mimeType);
   });
 
+  it('search_conversations supports a role filter (per-message granularity)', async () => {
+    // MCPUNIQUETOKEN is in the USER message; assistant said only 'done'.
+    const asUser = await client.callTool({ name: 'search_conversations', arguments: { query: 'MCPUNIQUETOKEN', role: 'user' } });
+    expect(asUser.structuredContent.total).toBeGreaterThanOrEqual(1);
+    const asAssistant = await client.callTool({ name: 'search_conversations', arguments: { query: 'MCPUNIQUETOKEN', role: 'assistant' } });
+    expect(asAssistant.structuredContent.total).toBe(0);
+  });
+
   it('list_facets returns structured facets', async () => {
     const res = await client.callTool({ name: 'list_facets', arguments: {} });
     expect(res.structuredContent).toHaveProperty('projects');

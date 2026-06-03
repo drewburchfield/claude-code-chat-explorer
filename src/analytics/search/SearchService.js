@@ -42,6 +42,8 @@ class SearchService {
       query = '',
       project = null,
       model = null,
+      role = null,
+      tool = null,
       dateFrom = null,
       dateTo = null,
       includeSubagents = false,
@@ -51,13 +53,25 @@ class SearchService {
     } = params;
 
     const hasQuery = typeof query === 'string' && query.trim().length > 0;
+    const wantSubagents = includeSubagents || subagentsOnly;
     let degraded = false;
     let candidates;
+    let mode = 'browse';
 
-    if (hasQuery) {
-      // Subagents must be in the candidate set if we either include them or
-      // restrict to them.
-      const wantSubagents = includeSubagents || subagentsOnly;
+    if (hasQuery && (role || tool)) {
+      // Role/tool-granular path (per-message FTS). Requires the backend to
+      // expose searchConversationsByRole.
+      mode = 'fts-role';
+      candidates = this.db.searchConversationsByRole(query, {
+        role: role || null,
+        tool: tool || null,
+        includeSubagents: wantSubagents,
+        limit: this.CANDIDATE_LIMIT,
+        offset: 0,
+      });
+      degraded = !!candidates._searchDegraded;
+    } else if (hasQuery) {
+      mode = 'fts';
       candidates = this.db.searchConversationsWithSnippets(query, {
         includeSubagents: wantSubagents,
         limit: this.CANDIDATE_LIMIT,
@@ -82,8 +96,8 @@ class SearchService {
     return {
       results: page,
       total,
-      appliedFilters: { query: hasQuery ? query : null, project, model, dateFrom, dateTo, includeSubagents, subagentsOnly },
-      searchMode: hasQuery ? 'fts' : 'browse',
+      appliedFilters: { query: hasQuery ? query : null, project, model, role, tool, dateFrom, dateTo, includeSubagents, subagentsOnly },
+      searchMode: mode,
       degraded,
     };
   }
