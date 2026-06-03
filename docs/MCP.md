@@ -56,3 +56,13 @@ web app once, which indexes your history).
 
 If you run the web app in Docker, point `CLAUDE_DB_PATH` at the host-mounted DB file
 (the `chat-explorer-*-db` volume mount, e.g. `~/.claude/data/conversations.db`).
+
+### Transcript access
+
+The `claude-chat://conversation/{id}` resource streams the raw JSONL transcript from the
+path recorded at index time (under `~/.claude/projects/...`). The MCP server therefore
+needs read access to those files at their **original paths** — running it on the host is
+simplest. If you run it in a container, mount `~/.claude` at the same absolute path the
+index used (as the dev compose does). Without that, `search_conversations` still works
+(metadata + snippets come from the DB), but reading a conversation resource returns a
+clear "Transcript file unavailable" error.
