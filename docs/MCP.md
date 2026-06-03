@@ -66,3 +66,7 @@ simplest. If you run it in a container, mount `~/.claude` at the same absolute p
 index used (as the dev compose does). Without that, `search_conversations` still works
 (metadata + snippets come from the DB), but reading a conversation resource returns a
 clear "Transcript file unavailable" error.
+
+Transcript reads are restricted to the configured root (`<CLAUDE_HOME>/projects` by
+default): the server refuses to read a file whose indexed path resolves outside that
+root, so a poisoned or stale index row can't be used to read arbitrary files.
