@@ -781,6 +781,7 @@ class DatabaseManager {
   removeConversation(id) {
     const transaction = this.db.transaction(() => {
       this.db.prepare('DELETE FROM conversation_fts WHERE conversation_id = ?').run(id);
+      this.db.prepare('DELETE FROM message_fts WHERE conversation_id = ?').run(id);
       this.db.prepare('DELETE FROM tool_usage WHERE conversation_id = ?').run(id);
       this.db.prepare('DELETE FROM conversations WHERE id = ?').run(id);
     });

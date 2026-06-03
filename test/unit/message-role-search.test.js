@@ -54,4 +54,10 @@ describe('searchConversationsByRole', () => {
     expect(r.length).toBe(1);
     expect(r[0].snippet).toContain('ROLETOKEN');
   });
+
+  it('removeConversation cleans up message_fts (no orphans)', () => {
+    expect(db.searchConversationsByRole('ROLETOKEN', {}).length).toBe(1);
+    db.removeConversation('c1');
+    expect(db.searchConversationsByRole('ROLETOKEN', {}).length).toBe(0);
+  });
 });
