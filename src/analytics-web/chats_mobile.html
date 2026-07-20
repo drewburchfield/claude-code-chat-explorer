@@ -3194,13 +3194,13 @@
                             : '';
 
                         return `
-                            <div class="conversation-item${subagentClass}${stubClass}" data-conversation-id="${conv.id}" style="display: ${isExpanded ? 'flex' : 'none'}">
+                            <div class="conversation-item${subagentClass}${stubClass}" data-conversation-id="${this.escapeHtml(conv.id)}" style="display: ${isExpanded ? 'flex' : 'none'}">
                                 <div class="conversation-avatar conversation-avatar-small">
-                                    ${conversationId.substring(0, 2).toUpperCase()}
+                                    ${this.escapeHtml(conversationId.substring(0, 2).toUpperCase())}
                                 </div>
                                 <div class="conversation-content">
                                     <div class="conversation-header">
-                                        <div class="conversation-name">Session ${conversationId}</div>
+                                        <div class="conversation-name">Session ${this.escapeHtml(conversationId)}</div>
                                         ${subagentBadge}${subagentCount}
                                         <div class="conversation-time">${lastActivity}</div>
                                     </div>
@@ -3634,13 +3634,13 @@
                 const messageIndexAttr = messageIndex !== undefined ? ` data-message-index="${messageIndex}"` : '';
 
                 return `
-                    <div class="message message-${isUser ? 'user' : 'assistant'}${hasToolsClass}" data-message-id="${message.id || ''}"${messageIndexAttr}>
+                    <div class="message message-${isUser ? 'user' : 'assistant'}${hasToolsClass}" data-message-id="${this.escapeHtml(message.id || '')}"${messageIndexAttr}>
                         <div class="message-bubble">
                             <div class="message-content">
                                 ${this.formatMessageContent(message.content, message)}
                             </div>
                             <div class="message-meta">
-                                <span class="message-time" title="${fullTimestamp}">${timestamp}</span>
+                                <span class="message-time" title="${this.escapeHtml(fullTimestamp)}">${this.escapeHtml(timestamp)}</span>
                                 ${hasTools ? `<span class="tool-indicator">🔧 ${toolCount}</span>` : ''}
                                 ${message.usage && (message.usage.input_tokens > 0 || message.usage.output_tokens > 0) ? `
                                     <span class="token-indicator">
@@ -3729,20 +3729,10 @@
                     const messageId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
                     
                     // Format the preview text
-                    const formattedPreview = processedText
-                        .replace(/```(\w+)?\n([\s\S]+?)\n```/g, '<pre><code class="$1">$2</code></pre>')
-                        .replace(/`([^`]+)`/g, '<code>$1</code>')
-                        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-                        .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-                        .replace(/\n/g, '<br>');
+                    const formattedPreview = BlockRenderers.formatTextContent(processedText);
                     
                     // Format the hidden content
-                    const formattedHidden = expandableContent
-                        .replace(/```(\w+)?\n([\s\S]+?)\n```/g, '<pre><code class="$1">$2</code></pre>')
-                        .replace(/`([^`]+)`/g, '<code>$1</code>')
-                        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-                        .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-                        .replace(/\n/g, '<br>');
+                    const formattedHidden = BlockRenderers.formatTextContent(expandableContent);
                     
                     return `
                         <div class="expandable-message">
@@ -3761,12 +3751,7 @@
                 }
                 
                 // Basic markdown-like formatting for normal length messages
-                return text
-                    .replace(/```(\w+)?\n([\s\S]+?)\n```/g, '<pre><code class="$1">$2</code></pre>')
-                    .replace(/`([^`]+)`/g, '<code>$1</code>')
-                    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-                    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-                    .replace(/\n/g, '<br>');
+                return BlockRenderers.formatTextContent(text);
             }
 
             formatToolCall(toolCall) {
@@ -3826,7 +3811,7 @@
                             }
                         ">
                             <span class="tool-bullet">⏺</span>
-                            <span class="tool-name">${toolName}</span>${toolSummary ? `<span class="tool-summary-text">(${toolSummary})</span>` : ''}
+                            <span class="tool-name">${this.escapeHtml(toolName)}</span>${toolSummary ? `<span class="tool-summary-text">(${this.escapeHtml(toolSummary)})</span>` : ''}
                         </div>
                         <div class="tool-expand-note" onclick="this.parentNode.querySelector('.tool-summary').click();">
                             <span class="tool-branch">⎿</span>
@@ -4532,9 +4517,9 @@
                     const tagElement = document.createElement('div');
                     tagElement.className = 'filter-tag';
                     tagElement.innerHTML = `
-                        <span class="filter-tag-icon">${tag.icon}</span>
-                        <span class="filter-tag-label">${tag.label}:</span>
-                        <span class="filter-tag-value">${tag.value}</span>
+                        <span class="filter-tag-icon">${this.escapeHtml(tag.icon)}</span>
+                        <span class="filter-tag-label">${this.escapeHtml(tag.label)}:</span>
+                        <span class="filter-tag-value">${this.escapeHtml(tag.value)}</span>
                     `;
                     container.appendChild(tagElement);
                 });
@@ -5910,7 +5895,7 @@
             } catch (error) {
                 console.error('❌ Failed to fetch analytics:', error);
                 document.getElementById('analyticsLoading').innerHTML =
-                    `<p style="color: #ef4444;">Failed to load analytics: ${error.message}</p>`;
+                    `<p style="color: #ef4444;">Failed to load analytics: ${BlockRenderers.escapeHtml(error.message)}</p>`;
             }
         }
 
@@ -5976,7 +5961,7 @@
                             font-family: monospace;
                             color: var(--text-primary);
                         ">
-                            <span>${usage.model}</span>
+                            <span>${BlockRenderers.escapeHtml(usage.model)}</span>
                             <span style="
                                 padding: 2px 6px;
                                 background: rgba(139, 92, 246, 0.3);
@@ -6004,7 +5989,7 @@
                         return `
                             <div style="margin-bottom: 10px; padding: 8px; background: rgba(255,255,255,0.03); border-radius: 6px;">
                                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-                                    <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">${tool}</span>
+                                    <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">${BlockRenderers.escapeHtml(tool)}</span>
                                     <span style="font-size: 12px; color: var(--text-secondary);">${count} calls (${percentage}%)</span>
                                 </div>
                                 <div style="height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;">
@@ -6083,7 +6068,7 @@
                                     font-size: 12px;
                                     color: var(--text-primary);
                                 ">
-                                    <span>${agent.type}</span>
+                                    <span>${BlockRenderers.escapeHtml(agent.type)}</span>
                                     <span style="color: var(--text-secondary); font-size: 11px;">×${agent.count}</span>
                                 </span>
                             `;
@@ -6110,7 +6095,7 @@
                                     font-family: monospace;
                                     color: var(--text-primary);
                                 ">
-                                    <span>${cmd.name}</span>
+                                    <span>${BlockRenderers.escapeHtml(cmd.name)}</span>
                                     <span style="color: var(--text-secondary); font-size: 11px;">×${cmd.count}</span>
                                 </span>
                             `;
@@ -6136,7 +6121,7 @@
                                     font-size: 12px;
                                     color: var(--text-primary);
                                 ">
-                                    <span>${skill.name}</span>
+                                    <span>${BlockRenderers.escapeHtml(skill.name)}</span>
                                     <span style="color: var(--text-secondary); font-size: 11px;">×${skill.count}</span>
                                 </span>
                             `;

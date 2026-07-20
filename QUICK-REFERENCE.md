@@ -5,11 +5,15 @@
 | Task | Command |
 |------|---------|
 | Start (first time or after reset) | `./quick-start.sh` |
-| View dashboard | http://localhost:9876 |
+| View dashboard | Open the authenticated `Local access:` URL from `docker compose logs --tail=30 chat-explorer` |
 | View logs | `docker compose logs -f` |
 | Stop | `docker compose down` |
 | Restart | `docker compose restart` |
 | Rebuild | `docker compose up -d --build` |
+
+The authenticated URL sets an HttpOnly cookie and redirects to the clean
+`http://localhost:9876/` address. To use monitoring scripts, export a stable
+token before startup, for example `export CHAT_EXPLORER_AUTH_TOKEN="$(openssl rand -hex 32)"`.
 
 ## Auto-Start Behavior
 

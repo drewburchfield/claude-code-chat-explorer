@@ -12,6 +12,12 @@ MAX_AVG_CPU="${MAX_AVG_CPU:-8}"
 MAX_P95_CPU="${MAX_P95_CPU:-40}"
 MAX_MAX_CPU="${MAX_MAX_CPU:-80}"
 MAX_WATCHER_ERRORS="${MAX_WATCHER_ERRORS:-0}"
+CHAT_EXPLORER_AUTH_TOKEN="${CHAT_EXPLORER_AUTH_TOKEN:-}"
+
+if [ -z "$CHAT_EXPLORER_AUTH_TOKEN" ]; then
+  echo "CHAT_EXPLORER_AUTH_TOKEN must be set so the quality gate can read protected metrics" >&2
+  exit 1
+fi
 
 OUT_DIR="${OUT_DIR:-/tmp/quality-gate-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$OUT_DIR"
@@ -46,7 +52,7 @@ mkdir -p "$(dirname "$BENCH_FILE")"
 : > "$BENCH_FILE"
 
 log "Building and starting container"
-docker compose up -d --build chat-explorer >/dev/null
+docker compose up -d --build >/dev/null
 sleep 6
 
 START_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -69,7 +75,8 @@ done
 
 wait "$STATS_PID"
 docker logs --since "$START_TS" "$CONTAINER_NAME" > "$OUT_DIR/container.log" 2>&1 || true
-curl -sf "http://127.0.0.1:${PORT}/api/system/metrics" > "$OUT_DIR/metrics.json"
+curl -sf -H "Authorization: Bearer ${CHAT_EXPLORER_AUTH_TOKEN}" \
+  "http://127.0.0.1:${PORT}/api/system/metrics" > "$OUT_DIR/metrics.json"
 
 IFS='|' read -r samples avg_cpu p95_cpu max_cpu <<< "$(calc_cpu_stats "$OUT_DIR/stats.txt")"
 watcher_errors="$(json_int "$OUT_DIR/metrics.json" "watcherErrors")"

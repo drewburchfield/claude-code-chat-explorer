@@ -6,8 +6,8 @@ services:
         USER_ID: 501
     container_name: claude-code-chat-explorer
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:9876:9876"  # Localhost only
+    expose:
+      - "9876"
     volumes:
       # Mount at SAME absolute path so symlinks resolve correctly
       - ${HOME}/.claude:${HOME}/.claude:ro
@@ -23,6 +23,14 @@ services:
       # events through Docker Desktop's VirtioFS bridge on macOS/Windows.
       - CHOKIDAR_USEPOLLING=1
       - CHOKIDAR_INTERVAL=2000
+      # Native runs bind to loopback by default. Inside Docker the process
+      # must listen on the container interface; the published host port above
+      # remains restricted to 127.0.0.1.
+      - CHAT_EXPLORER_HOST=0.0.0.0
+      - CHAT_EXPLORER_AUTH_TOKEN=${CHAT_EXPLORER_AUTH_TOKEN:-}
+
+    networks:
+      - chat-explorer-internal
 
     # Security hardening
     cap_drop:
@@ -41,6 +49,39 @@ services:
         reservations:
           memory: 256M
 
+  # This process publishes localhost but has no transcript/database mounts and
+  # uses only Node's core HTTP/TCP modules. The transcript-reading app above
+  # remains on an internal-only network with no outbound route.
+  chat-explorer-proxy:
+    build:
+      context: .
+      args:
+        USER_ID: 501
+    container_name: claude-code-chat-explorer-proxy
+    restart: unless-stopped
+    command: ["node", "src/loopback-proxy.js"]
+    depends_on:
+      - chat-explorer
+    ports:
+      - "127.0.0.1:9876:9876"
+    environment:
+      - CHAT_EXPLORER_UPSTREAM_HOST=chat-explorer
+      - CHAT_EXPLORER_UPSTREAM_PORT=9876
+    networks:
+      - chat-explorer-internal
+      - chat-explorer-ingress
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
   # chat-explorer-test:
   #   build:
   #     context: .
@@ -54,3 +95,8 @@ services:
 
 volumes:
   chat-explorer-db:
+
+networks:
+  chat-explorer-internal:
+    internal: true
+  chat-explorer-ingress:

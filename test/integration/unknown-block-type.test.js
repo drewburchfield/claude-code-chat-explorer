@@ -31,7 +31,7 @@ describe('Unknown block type forward-compat', () => {
     await fs.writeFile(path.join(projectDir, 'session-live.jsonl'), fixture);
 
     process.env.CLAUDE_DB_PATH = path.join(tempHome, 'conversations.db');
-    app = new ChatsMobile({ port: 0, claudeDir, verbose: false });
+    app = new ChatsMobile({ port: 0, claudeDir, verbose: false, authToken: false });
     await app.initialize();
     await app.startServer();
   }, 30000);

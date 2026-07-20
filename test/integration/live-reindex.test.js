@@ -54,6 +54,7 @@ describe('Live re-indexing (watcher to DB)', () => {
       port: 0,
       claudeDir,
       verbose: false,
+      authToken: false,
     });
 
     await app.initialize();

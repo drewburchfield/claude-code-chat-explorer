@@ -29,6 +29,20 @@
   }
 
   /**
+   * Render the small markdown subset used by the chat view. Escaping must
+   * happen before markup is added: transcript text can contain HTML copied
+   * from repositories, web pages, tool output, or another model.
+   */
+  function formatTextContent(value) {
+    return escapeHtml(value)
+      .replace(/```(\w+)?\n([\s\S]+?)\n```/g, '<pre><code class="$1">$2</code></pre>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+      .replace(/\n/g, '<br>');
+  }
+
+  /**
    * `image` blocks come in two shapes from the Claude API:
    *   - { type: 'image', source: { type: 'base64', media_type, data } }
    *   - { type: 'image', source: { type: 'url', url } }
@@ -129,6 +143,7 @@
 
   return {
     escapeHtml,
+    formatTextContent,
     buildImageSrc,
     formatThinkingBlock,
     formatImageBlock,

@@ -98,6 +98,7 @@ describe('FTS5 tool-content indexing', () => {
       port: 0,
       claudeDir,
       verbose: false,
+      authToken: false,
     });
 
     await app.initialize();
