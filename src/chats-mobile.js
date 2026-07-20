@@ -4,6 +4,7 @@ const path = require('path');
 const express = require('express');
 const open = require('open');
 const os = require('os');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 const ConversationAnalyzer = require('./analytics/core/ConversationAnalyzer');
 const StateCalculator = require('./analytics/core/StateCalculator');
@@ -15,6 +16,12 @@ const SessionSharing = require('./session-sharing');
 const DatabaseBackend = require('./analytics/data/DatabaseBackend');
 const BoundedMap = require('./utils/BoundedMap');
 const { priceConversation } = require('./utils/ModelPricing');
+const {
+  AUTH_COOKIE_NAME,
+  authorizeWebSocketUpgrade,
+  isRequestAuthorized,
+  safeEqual,
+} = require('./security');
 
 // Cap the per-conversation state Maps. With 200 entries we cover the
 // "user has 200 conversations open recently" window; older
@@ -28,6 +35,10 @@ class ChatsMobile {
     this.app = express();
     // options.port: explicit numeric port, or 0 for an ephemeral port (tests).
     this.port = options.port !== undefined ? options.port : 9876;
+    this.host = options.host || process.env.CHAT_EXPLORER_HOST || '127.0.0.1';
+    this.authToken = options.authToken === false
+      ? null
+      : (options.authToken || process.env.CHAT_EXPLORER_AUTH_TOKEN || crypto.randomBytes(32).toString('base64url'));
     this.fileWatcher = new FileWatcher();
     this.stateCalculator = new StateCalculator();
     this.dataCache = new DataCache();
@@ -153,7 +164,43 @@ class ChatsMobile {
    * Setup Express middleware
    */
   setupMiddleware() {
-    this.app.use(express.json());
+    this.app.disable('x-powered-by');
+    this.app.use((req, res, next) => {
+      res.set({
+        'Cache-Control': 'no-store',
+        'Content-Security-Policy': "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; connect-src 'self' ws: wss:",
+        'Referrer-Policy': 'no-referrer',
+        'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'DENY',
+      });
+      next();
+    });
+
+    if (this.authToken) {
+      this.app.use((req, res, next) => {
+        if (req.method === 'GET' && req.path === '/healthz') return next();
+
+        // The one-time query parameter bootstraps an HttpOnly, same-site
+        // session cookie and is immediately removed from the address bar.
+        if (req.method === 'GET' && req.path === '/' && typeof req.query.token === 'string') {
+          if (!safeEqual(req.query.token, this.authToken)) {
+            return res.status(401).type('text/plain').send('Invalid access token');
+          }
+          res.setHeader(
+            'Set-Cookie',
+            `${AUTH_COOKIE_NAME}=${encodeURIComponent(this.authToken)}; HttpOnly; SameSite=Strict; Path=/`
+          );
+          return res.redirect(303, '/');
+        }
+
+        if (!isRequestAuthorized(req, this.authToken)) {
+          return res.status(401).json({ error: 'Authentication required' });
+        }
+        return next();
+      });
+    }
+
+    this.app.use(express.json({ limit: '100kb' }));
     
     // Serve static files from analytics-web directory (for services, components, etc.)
     this.app.use('/services', express.static(path.join(__dirname, 'analytics-web', 'services')));
@@ -165,6 +212,9 @@ class ChatsMobile {
    * Setup API routes
    */
   setupRoutes() {
+    this.app.get('/healthz', (req, res) => {
+      res.json({ status: 'ok' });
+    });
     // API to get conversations
     this.app.get('/api/conversations', (req, res) => {
       try {
@@ -1463,22 +1513,53 @@ class ChatsMobile {
   /**
    * Start the mobile chats server
    */
+  getAllowedWebSocketOrigins() {
+    return new Set([
+      `http://localhost:${this.port}`,
+      `http://127.0.0.1:${this.port}`,
+      `http://[::1]:${this.port}`,
+    ]);
+  }
+
+  getAuthenticatedUrl(url = this.localUrl) {
+    if (!url || !this.authToken) return url;
+    const authenticatedUrl = new URL(url);
+    authenticatedUrl.searchParams.set('token', this.authToken);
+    return authenticatedUrl.toString();
+  }
+
   async startServer() {
     return new Promise(async (resolve) => {
-      this.httpServer = this.app.listen(this.port, async () => {
+      this.httpServer = this.app.listen(this.port, this.host, async () => {
         // If port was 0 (ephemeral, used by tests), record the actual port the OS assigned.
         const address = this.httpServer.address();
         if (address && typeof address === 'object') {
           this.port = address.port;
         }
-        this.localUrl = `http://localhost:${this.port}`;
+        const displayHost = (this.host === '0.0.0.0' || this.host === '::') ? 'localhost' : this.host;
+        const formattedHost = displayHost.includes(':') && !displayHost.startsWith('[')
+          ? `[${displayHost}]`
+          : displayHost;
+        this.localUrl = `http://${formattedHost}:${this.port}`;
         console.log(chalk.green(`📱 Chats Mobile server started at ${this.localUrl}`));
         
         // Initialize WebSocket server with HTTP server
         try {
           this.webSocketServer = new WebSocketServer(this.httpServer, {
             port: this.port,
-            path: '/ws'
+            path: '/ws',
+            verifyClient: (info, done) => {
+              const decision = authorizeWebSocketUpgrade(
+                info,
+                this.authToken,
+                this.getAllowedWebSocketOrigins()
+              );
+              if (!decision.ok) {
+                done(false, decision.statusCode, decision.message);
+              } else {
+                done(true);
+              }
+            }
           });
           await this.webSocketServer.initialize();
           this.log('info', chalk.green('🌐 WebSocket server initialized'));
@@ -1600,8 +1681,9 @@ class ChatsMobile {
     try {
       // Use tunnel URL if available, otherwise local URL
       const url = this.tunnelUrl || this.localUrl || `http://localhost:${this.port}`;
+      const authenticatedUrl = this.getAuthenticatedUrl(url);
       console.log(chalk.cyan(`🌐 Opening browser to ${url}`));
-      await open(url);
+      await open(authenticatedUrl);
     } catch (error) {
       console.warn(chalk.yellow('⚠️  Could not auto-open browser:', error.message));
     }
@@ -1672,7 +1754,7 @@ async function startChatsMobile(options = {}) {
     console.log(chalk.green('✅ Claude Code Chats Mobile is running!'));
     
     // Show access URLs
-    console.log(chalk.cyan(`📱 Local access: ${chatsMobile.localUrl}`));
+    console.log(chalk.cyan(`📱 Local access: ${chatsMobile.getAuthenticatedUrl()}`));
     if (chatsMobile.tunnelUrl) {
       console.log(chalk.cyan(`☁️  Remote access: ${chatsMobile.tunnelUrl}`));
       console.log(chalk.blue(`🌐 Opening remote URL: ${chatsMobile.tunnelUrl}`));

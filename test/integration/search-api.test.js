@@ -39,7 +39,7 @@ describe('SearchService REST surface', () => {
       session('s', 'claude-opus-4', 'subagentonlytoken explored the fox').map(l => JSON.stringify(l)).join('\n') + '\n');
 
     process.env.CLAUDE_DB_PATH = path.join(tempHome, 'conversations.db');
-    app = new ChatsMobile({ port: 0, claudeDir, verbose: false });
+    app = new ChatsMobile({ port: 0, claudeDir, verbose: false, authToken: false });
     await app.initialize();
     await app.startServer();
     if (!app.databaseBackend?.isInitialized) throw new Error('DB backend did not initialise');

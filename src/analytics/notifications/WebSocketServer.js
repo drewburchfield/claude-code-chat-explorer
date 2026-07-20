@@ -31,12 +31,17 @@ class WebSocketServer {
     try {
       console.log(chalk.blue('🔌 Initializing WebSocket server...'));
       
-      // Create WebSocket server
-      this.wss = new WebSocket.Server({
+      // Create WebSocket server. The caller supplies verifyClient so the
+      // upgrade is authenticated before any queued transcript is delivered.
+      const serverOptions = {
         server: this.httpServer,
         path: this.options.path,
         clientTracking: true
-      });
+      };
+      if (typeof this.options.verifyClient === 'function') {
+        serverOptions.verifyClient = this.options.verifyClient;
+      }
+      this.wss = new WebSocket.Server(serverOptions);
 
       this.setupEventHandlers();
       this.startHeartbeat();

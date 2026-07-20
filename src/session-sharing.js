@@ -410,6 +410,7 @@ class SessionSharing {
     if (!sessionData.conversation || !sessionData.conversation.id) {
       throw new Error('Invalid session file - missing conversation data');
     }
+    this.validateConversationId(sessionData.conversation.id);
 
     if (!sessionData.messages || !Array.isArray(sessionData.messages)) {
       throw new Error('Invalid session file - missing or invalid messages');
@@ -440,8 +441,12 @@ class SessionSharing {
     await fs.ensureDir(projectDir);
 
     // Generate conversation filename with original ID
-    const conversationId = sessionData.conversation.id;
-    const conversationFile = path.join(projectDir, `${conversationId}.jsonl`);
+    const conversationId = this.validateConversationId(sessionData.conversation.id);
+    const conversationFile = path.resolve(projectDir, `${conversationId}.jsonl`);
+    const resolvedProjectDir = path.resolve(projectDir);
+    if (!conversationFile.startsWith(resolvedProjectDir + path.sep)) {
+      throw new Error('Refusing to install a conversation outside the project directory');
+    }
 
     // Convert messages back to JSONL format (one JSON object per line)
     const jsonlContent = sessionData.messages
@@ -523,7 +528,19 @@ class SessionSharing {
     return projectName
       .replace(/[^a-zA-Z0-9-_]/g, '-')
       .replace(/-+/g, '-')
-      .toLowerCase();
+      .toLowerCase() || 'shared-session';
+  }
+
+  /**
+   * Conversation IDs become filenames. Keep them to the same conservative
+   * alphabet used by UUIDs and subagent IDs so separators and traversal
+   * segments can never influence the destination path.
+   */
+  validateConversationId(conversationId) {
+    if (typeof conversationId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(conversationId)) {
+      throw new Error('Invalid conversation ID: only letters, numbers, hyphens, and underscores are allowed');
+    }
+    return conversationId;
   }
 }
 

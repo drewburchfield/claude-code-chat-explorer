@@ -24,12 +24,15 @@ if docker ps -a --format '{{.Names}}' | grep -q '^claude-code-chat-explorer$'; t
 
     if docker ps --format '{{.Names}}' | grep -q '^claude-code-chat-explorer$'; then
         echo "✅ Container is already running!"
-        echo "📊 Access the web interface at: http://localhost:9876"
+        docker compose up -d
+        echo "📊 Authenticated access URL:"
+        docker compose logs --tail=30 chat-explorer | grep "Local access:" || true
     else
         echo "🚀 Starting existing container..."
         docker compose up -d
         echo "✅ Container started!"
-        echo "📊 Access the web interface at: http://localhost:9876"
+        echo "📊 Authenticated access URL:"
+        docker compose logs --tail=30 chat-explorer | grep "Local access:" || true
     fi
 else
     echo "📦 Container not found. Creating new container..."
@@ -37,7 +40,8 @@ else
     docker compose up -d --build
     echo ""
     echo "✅ Claude Code Chat Explorer is running!"
-    echo "📊 Access the web interface at: http://localhost:9876"
+    echo "📊 Authenticated access URL:"
+    docker compose logs --tail=30 chat-explorer | grep "Local access:" || true
 fi
 
 echo ""

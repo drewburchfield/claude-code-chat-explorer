@@ -32,7 +32,13 @@ cd claude-code-chat-explorer
 ./quick-start.sh
 ```
 
-Open **http://localhost:9876** in your browser.
+The startup output prints a one-time authenticated URL. Open that link in your
+browser; it sets an HttpOnly session cookie and immediately removes the token
+from the address bar.
+
+The web server is published on `127.0.0.1:9876` only through a small proxy that
+has no transcript or database mounts. The transcript-reading app stays on an
+internal-only Docker network, so it cannot make outbound Internet connections.
 
 ## Features
 
@@ -90,7 +96,9 @@ The server needs read access to the conversation JSONL files at their indexed pa
 3. **Watches** for changes and updates the index incrementally
 4. **Serves** a web interface on port 9876
 
-The database and all processing happens locally. Your conversations never leave your machine.
+The database and all processing happens locally. The default container network
+blocks runtime outbound access, and HTTP/WebSocket access requires the random
+token printed at startup.
 
 ## Architecture
 
@@ -184,8 +192,13 @@ The container runs hardened:
 - Dropped capabilities
 - Memory limits (1GB)
 - Localhost-only port binding
+- Random-token authentication for HTTP and WebSocket access
+- Exact-origin checks for WebSocket upgrades
+- Internal Docker network with no runtime outbound access
 
-Your Claude data is mounted read-only.
+Your Claude data is mounted read-only. Native development runs also bind to
+`127.0.0.1` by default and require a random token unless authentication is
+explicitly disabled by a test harness.
 
 ## Troubleshooting
 

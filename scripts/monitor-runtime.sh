@@ -8,6 +8,12 @@ INTERVAL_SECONDS="${INTERVAL_SECONDS:-5}"
 MAX_AVG_CPU="${MAX_AVG_CPU:-10}"
 MAX_MAX_CPU="${MAX_MAX_CPU:-60}"
 MAX_WATCHER_ERRORS_DELTA="${MAX_WATCHER_ERRORS_DELTA:-0}"
+CHAT_EXPLORER_AUTH_TOKEN="${CHAT_EXPLORER_AUTH_TOKEN:-}"
+
+if [ -z "$CHAT_EXPLORER_AUTH_TOKEN" ]; then
+  echo "CHAT_EXPLORER_AUTH_TOKEN must be set so the monitor can read protected metrics" >&2
+  exit 1
+fi
 
 OUT_DIR="${OUT_DIR:-/tmp/runtime-monitor-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$OUT_DIR"
@@ -25,14 +31,16 @@ END_EPOCH=$(( $(date +%s) + DURATION_SECONDS ))
 
 log "Monitoring for ${DURATION_SECONDS}s at ${INTERVAL_SECONDS}s intervals"
 
-curl -sf "http://127.0.0.1:${PORT}/api/system/metrics" > "$OUT_DIR/metrics-start.json"
+curl -sf -H "Authorization: Bearer ${CHAT_EXPLORER_AUTH_TOKEN}" \
+  "http://127.0.0.1:${PORT}/api/system/metrics" > "$OUT_DIR/metrics-start.json"
 START_WATCHER_ERRORS="$(json_int "$OUT_DIR/metrics-start.json" "watcherErrors")"
 START_WATCHER_ERRORS="${START_WATCHER_ERRORS:-0}"
 
 while [ "$(date +%s)" -lt "$END_EPOCH" ]; do
   ts="$(date +%s)"
   docker stats --no-stream --format '{{.CPUPerc}}|{{.MemUsage}}' "$CONTAINER_NAME" | sed "s/^/$ts|/" >> "$OUT_DIR/stats.txt"
-  curl -sf "http://127.0.0.1:${PORT}/api/system/metrics" > "$OUT_DIR/metrics-current.json"
+  curl -sf -H "Authorization: Bearer ${CHAT_EXPLORER_AUTH_TOKEN}" \
+    "http://127.0.0.1:${PORT}/api/system/metrics" > "$OUT_DIR/metrics-current.json"
   sleep "$INTERVAL_SECONDS"
 done
 

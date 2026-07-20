@@ -14,8 +14,8 @@ services:
         USER_ID: 501
     container_name: claude-code-chat-explorer-dev
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:9877:9876"
+    expose:
+      - "9876"
     volumes:
       - ${HOME}/.claude:${HOME}/.claude:ro
       - chat-explorer-dev-db:/data
@@ -27,6 +27,11 @@ services:
       - CLAUDE_DB_PATH=/data/conversations.db
       - CHOKIDAR_USEPOLLING=1
       - CHOKIDAR_INTERVAL=2000
+      - CHAT_EXPLORER_HOST=0.0.0.0
+      - CHAT_EXPLORER_AUTH_TOKEN=${CHAT_EXPLORER_AUTH_TOKEN:-}
+
+    networks:
+      - chat-explorer-dev-internal
 
     cap_drop:
       - ALL
@@ -44,5 +49,36 @@ services:
         reservations:
           memory: 256M
 
+  chat-explorer-dev-proxy:
+    build:
+      context: .
+      args:
+        USER_ID: 501
+    container_name: claude-code-chat-explorer-dev-proxy
+    restart: unless-stopped
+    command: ["node", "src/loopback-proxy.js"]
+    depends_on:
+      - chat-explorer-dev
+    ports:
+      - "127.0.0.1:9877:9876"
+    environment:
+      - CHAT_EXPLORER_UPSTREAM_HOST=chat-explorer-dev
+      - CHAT_EXPLORER_UPSTREAM_PORT=9876
+    networks:
+      - chat-explorer-dev-internal
+      - chat-explorer-dev-ingress
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+
 volumes:
   chat-explorer-dev-db:
+
+networks:
+  chat-explorer-dev-internal:
+    internal: true
+  chat-explorer-dev-ingress:

@@ -131,6 +131,22 @@ describe('BlockRenderers.dispatchBlock', () => {
   });
 });
 
+describe('BlockRenderers.formatTextContent', () => {
+  it('escapes active HTML before adding markdown markup', () => {
+    const html = BlockRenderers.formatTextContent('<img src=x onerror="alert(1)"> **safe bold**');
+    expect(html).toContain('&lt;img src=x onerror=&quot;alert(1)&quot;&gt;');
+    expect(html).not.toContain('<img');
+    expect(html).toContain('<strong>safe bold</strong>');
+  });
+
+  it('escapes HTML inside fenced and inline code', () => {
+    const html = BlockRenderers.formatTextContent('```html\n<script>alert(1)</script>\n``` `</code>`');
+    expect(html).not.toContain('<script>');
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(html).toContain('&lt;/code&gt;');
+  });
+});
+
 describe('BlockRenderers.RENDERED_BLOCK_TYPES', () => {
   it('exposes the set of block types this module renders explicitly', () => {
     expect(BlockRenderers.RENDERED_BLOCK_TYPES.has('thinking')).toBe(true);

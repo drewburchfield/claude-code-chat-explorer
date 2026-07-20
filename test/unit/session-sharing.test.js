@@ -102,6 +102,28 @@ describe('SessionSharing.validateCloneUrl', () => {
   });
 });
 
+describe('SessionSharing.validateConversationId', () => {
+  const ss = makeSharing();
+
+  it('accepts UUID and subagent-style identifiers', () => {
+    expect(ss.validateConversationId('abc123-DEF_456')).toBe('abc123-DEF_456');
+  });
+
+  it('rejects traversal, path separators, and filename extensions', () => {
+    for (const id of ['../../outside', '..\\outside', '/tmp/absolute', 'session.jsonl', '']) {
+      expect(() => ss.validateConversationId(id)).toThrow(/Invalid conversation ID/);
+    }
+  });
+
+  it('is enforced by session-data validation', () => {
+    expect(() => ss.validateSessionData({
+      version: '1.0.0',
+      conversation: { id: '../../outside' },
+      messages: [{}],
+    })).toThrow(/Invalid conversation ID/);
+  });
+});
+
 describe('SessionSharing.downloadSession', () => {
   const ss = makeSharing();
   let originalFetch;
