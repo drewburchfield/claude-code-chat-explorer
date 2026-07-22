@@ -22,6 +22,8 @@ services:
     environment:
       - NODE_ENV=production
       - NODE_OPTIONS=--max-old-space-size=1024
+      # Bind all interfaces inside the container (host mapping above is loopback-only).
+      - CHATS_HOST=0.0.0.0
       - HOME=${HOME}
       - CLAUDE_HOME=${HOME}/.claude
       - CLAUDE_DB_PATH=/data/conversations.db
