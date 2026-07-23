@@ -153,8 +153,34 @@ class ChatsMobile {
    * Setup Express middleware
    */
   setupMiddleware() {
+    // Security headers (defense-in-depth). The viewer renders untrusted
+    // transcript content, so even though the server is normally reachable only
+    // from localhost, set a CSP plus the standard hardening headers. The CSP
+    // keeps 'unsafe-inline' for script/style because the viewer relies on inline
+    // handlers and inline <script>; the actual XSS fix is output-escaping in the
+    // renderer. connect-src 'self' limits exfiltration if anything slips
+    // through, and frame-ancestors 'none' blocks clickjacking/framing.
+    this.app.use((req, res, next) => {
+      res.setHeader('Content-Security-Policy', [
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: https:",
+        "font-src 'self'",
+        "connect-src 'self'",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "frame-ancestors 'none'"
+      ].join('; '));
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('X-Frame-Options', 'DENY');
+      res.setHeader('Referrer-Policy', 'no-referrer');
+      next();
+    });
+
     this.app.use(express.json());
-    
+
     // Serve static files from analytics-web directory (for services, components, etc.)
     this.app.use('/services', express.static(path.join(__dirname, 'analytics-web', 'services')));
     this.app.use('/components', express.static(path.join(__dirname, 'analytics-web', 'components')));

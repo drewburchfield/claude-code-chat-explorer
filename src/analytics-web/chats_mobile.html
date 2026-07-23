@@ -3703,7 +3703,16 @@
 
             formatTextContent(text) {
                 if (!text) return '';
-                
+
+                // Escape HTML *before* any markdown-style transforms below.
+                // Transcript text is untrusted (tool output, pasted content,
+                // imported sessions) and this string is later assigned via
+                // innerHTML, so raw markup like <img src=x onerror=...> would
+                // otherwise execute. The markdown regexes add their own trusted
+                // tags on top of the already-escaped text; backticks/asterisks
+                // aren't escaped, so code/bold/italic formatting still works.
+                text = this.escapeHtml(text);
+
                 // Check if text is very long (more than 10 lines or 800 characters)
                 const lines = text.split('\n');
                 const isLongText = lines.length > 10 || text.length > 800;
@@ -3826,7 +3835,7 @@
                             }
                         ">
                             <span class="tool-bullet">⏺</span>
-                            <span class="tool-name">${toolName}</span>${toolSummary ? `<span class="tool-summary-text">(${toolSummary})</span>` : ''}
+                            <span class="tool-name">${this.escapeHtml(toolName)}</span>${toolSummary ? `<span class="tool-summary-text">(${this.escapeHtml(toolSummary)})</span>` : ''}
                         </div>
                         <div class="tool-expand-note" onclick="this.parentNode.querySelector('.tool-summary').click();">
                             <span class="tool-branch">⎿</span>

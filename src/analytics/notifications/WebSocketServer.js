@@ -35,7 +35,11 @@ class WebSocketServer {
       this.wss = new WebSocket.Server({
         server: this.httpServer,
         path: this.options.path,
-        clientTracking: true
+        clientTracking: true,
+        // Reject cross-site WebSocket hijacking: a malicious page open in the
+        // user's browser must not be able to open a socket to this server and
+        // read pushed conversation data.
+        verifyClient: (info) => this.verifyOrigin(info)
       });
 
       this.setupEventHandlers();
@@ -46,6 +50,50 @@ class WebSocketServer {
     } catch (error) {
       console.error(chalk.red('❌ Failed to initialize WebSocket server:'), error);
       throw error;
+    }
+  }
+
+  /**
+   * Origin check for incoming WebSocket handshakes (ws `verifyClient`).
+   *
+   * A browser always sends an Origin header on a WebSocket handshake; a
+   * non-browser client (native ws, tests, curl) sends none and carries no
+   * ambient-authority CSRF risk, so those are allowed. For browser clients we
+   * require the Origin's host to equal the request Host header (same-origin).
+   * That automatically covers localhost, 127.0.0.1, and a user-opted Cloudflare
+   * tunnel host without hard-coding any of them, while rejecting a socket
+   * opened by a page served from any other site. An explicit
+   * `options.allowedOrigins` list can whitelist additional origins.
+   *
+   * @param {{origin?: string, req: import('http').IncomingMessage}} info
+   * @returns {boolean} true to accept the handshake, false to reject (403)
+   */
+  verifyOrigin(info) {
+    const req = info && info.req;
+    const origin = (info && info.origin) || (req && req.headers && req.headers.origin);
+
+    // No Origin header => not a browser cross-site request; allow.
+    if (!origin) return true;
+
+    try {
+      const originHost = new URL(origin).host;
+      const hostHeader = req && req.headers && req.headers.host;
+
+      if (hostHeader && originHost === hostHeader) return true;
+
+      if (Array.isArray(this.options.allowedOrigins) &&
+          this.options.allowedOrigins.includes(origin)) {
+        return true;
+      }
+
+      console.warn(chalk.yellow(
+        `🚫 Rejected cross-origin WebSocket handshake from ${origin} (host: ${hostHeader || 'unknown'})`
+      ));
+      return false;
+    } catch (error) {
+      // Unparseable Origin => reject rather than fail open.
+      console.warn(chalk.yellow(`🚫 Rejected WebSocket handshake with invalid Origin: ${origin}`));
+      return false;
     }
   }
 
