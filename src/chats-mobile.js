@@ -28,6 +28,10 @@ class ChatsMobile {
     this.app = express();
     // options.port: explicit numeric port, or 0 for an ephemeral port (tests).
     this.port = options.port !== undefined ? options.port : 9876;
+    // Bind loopback-only by default: transcripts contain secrets/source/tool
+    // output, and there is no auth on the API. Opt into a wider bind explicitly
+    // (Docker sets CHATS_HOST=0.0.0.0; its host-side mapping is 127.0.0.1-only).
+    this.host = options.host || process.env.CHATS_HOST || '127.0.0.1';
     this.fileWatcher = new FileWatcher();
     this.stateCalculator = new StateCalculator();
     this.dataCache = new DataCache();
@@ -1465,7 +1469,7 @@ class ChatsMobile {
    */
   async startServer() {
     return new Promise(async (resolve) => {
-      this.httpServer = this.app.listen(this.port, async () => {
+      this.httpServer = this.app.listen(this.port, this.host, async () => {
         // If port was 0 (ephemeral, used by tests), record the actual port the OS assigned.
         const address = this.httpServer.address();
         if (address && typeof address === 'object') {
@@ -1473,6 +1477,15 @@ class ChatsMobile {
         }
         this.localUrl = `http://localhost:${this.port}`;
         console.log(chalk.green(`📱 Chats Mobile server started at ${this.localUrl}`));
+        // Loud warning when bound beyond loopback: the API is unauthenticated,
+        // so a non-loopback bind exposes the full conversation history to the
+        // network. Docker's 0.0.0.0 is expected (host mapping is loopback-only).
+        const loopbackHosts = new Set(['127.0.0.1', '::1', 'localhost']);
+        if (!loopbackHosts.has(this.host) && !process.env.CHATS_HOST) {
+          console.log(chalk.red(`⚠️  Server is bound to ${this.host} (not loopback) with NO authentication.`));
+          console.log(chalk.red('    Anyone who can reach this port can read your entire conversation history.'));
+          console.log(chalk.yellow('    Put it behind an authenticating reverse proxy, or bind 127.0.0.1.'));
+        }
         
         // Initialize WebSocket server with HTTP server
         try {
@@ -1502,6 +1515,9 @@ class ChatsMobile {
   async setupCloudflaredTunnel() {
     console.log(chalk.blue('☁️  Setting up Cloudflare Tunnel...'));
     console.log(chalk.gray(`📡 Tunneling ${this.localUrl}...`));
+    console.log(chalk.red('⚠️  The tunnel publishes this UNAUTHENTICATED app to the public internet.'));
+    console.log(chalk.red('    Anyone with the tunnel URL can read your entire conversation history.'));
+    console.log(chalk.yellow('    Only use on a trusted network, and stop the tunnel when done.'));
     
     try {
       const { spawn } = require('child_process');

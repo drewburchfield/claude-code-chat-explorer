@@ -3729,20 +3729,10 @@
                     const messageId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
                     
                     // Format the preview text
-                    const formattedPreview = processedText
-                        .replace(/```(\w+)?\n([\s\S]+?)\n```/g, '<pre><code class="$1">$2</code></pre>')
-                        .replace(/`([^`]+)`/g, '<code>$1</code>')
-                        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-                        .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-                        .replace(/\n/g, '<br>');
-                    
+                    const formattedPreview = this.applyInlineMarkdown(processedText);
+
                     // Format the hidden content
-                    const formattedHidden = expandableContent
-                        .replace(/```(\w+)?\n([\s\S]+?)\n```/g, '<pre><code class="$1">$2</code></pre>')
-                        .replace(/`([^`]+)`/g, '<code>$1</code>')
-                        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-                        .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-                        .replace(/\n/g, '<br>');
+                    const formattedHidden = this.applyInlineMarkdown(expandableContent);
                     
                     return `
                         <div class="expandable-message">
@@ -3761,7 +3751,16 @@
                 }
                 
                 // Basic markdown-like formatting for normal length messages
-                return text
+                return this.applyInlineMarkdown(text);
+            }
+
+            // Escape HTML FIRST, then apply the lightweight markdown transforms, so
+            // untrusted transcript text (tool output, pasted content, imported
+            // sessions) can never inject markup. escapeHtml leaves backticks, '*',
+            // and newlines intact, so the markdown regexes still match; any < > &
+            // inside the text is neutralized before we wrap it in our own tags.
+            applyInlineMarkdown(text) {
+                return this.escapeHtml(text)
                     .replace(/```(\w+)?\n([\s\S]+?)\n```/g, '<pre><code class="$1">$2</code></pre>')
                     .replace(/`([^`]+)`/g, '<code>$1</code>')
                     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
@@ -3826,7 +3825,7 @@
                             }
                         ">
                             <span class="tool-bullet">⏺</span>
-                            <span class="tool-name">${toolName}</span>${toolSummary ? `<span class="tool-summary-text">(${toolSummary})</span>` : ''}
+                            <span class="tool-name">${this.escapeHtml(toolName)}</span>${toolSummary ? `<span class="tool-summary-text">(${this.escapeHtml(toolSummary)})</span>` : ''}
                         </div>
                         <div class="tool-expand-note" onclick="this.parentNode.querySelector('.tool-summary').click();">
                             <span class="tool-branch">⎿</span>
@@ -4001,10 +4000,14 @@
              */
             escapeHtml(text) {
                 if (typeof text !== 'string') return text;
-                
-                const div = document.createElement('div');
-                div.textContent = text;
-                return div.innerHTML;
+                // Encode quotes too, so this is safe in attribute context
+                // (e.g. title="${escapeHtml(...)}"), not just element body.
+                return text
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
             }
 
 
@@ -4676,9 +4679,14 @@
             }
 
             escapeHtml(text) {
-                const div = document.createElement('div');
-                div.textContent = text;
-                return div.innerHTML;
+                if (typeof text !== 'string') return text;
+                // Quote-safe so it can be used in attribute context too.
+                return text
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
             }
 
             // In-Conversation Search Methods

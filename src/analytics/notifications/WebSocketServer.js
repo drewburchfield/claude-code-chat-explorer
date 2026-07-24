@@ -35,7 +35,11 @@ class WebSocketServer {
       this.wss = new WebSocket.Server({
         server: this.httpServer,
         path: this.options.path,
-        clientTracking: true
+        clientTracking: true,
+        // Reject cross-site WebSocket connections. WebSockets are NOT covered by
+        // the same-origin policy, so without this any website the user visits
+        // could open ws://localhost/ws and read pushed conversation activity.
+        verifyClient: (info) => this.isAllowedOrigin(info)
       });
 
       this.setupEventHandlers();
@@ -47,6 +51,26 @@ class WebSocketServer {
       console.error(chalk.red('❌ Failed to initialize WebSocket server:'), error);
       throw error;
     }
+  }
+
+  /**
+   * Same-origin gate for the WebSocket handshake. A browser sends an `Origin`
+   * header it cannot forge; a legitimate page (localhost or via the tunnel) has
+   * an Origin whose host matches the request's Host header. A cross-site attacker
+   * page has Origin=evil.com but still Host=localhost, so it fails the match.
+   * Non-browser clients (CLI, tests) send no Origin and are allowed.
+   * @param {{origin?: string, req: import('http').IncomingMessage}} info
+   * @returns {boolean}
+   */
+  isAllowedOrigin(info) {
+    const origin = info.origin;
+    if (!origin) return true; // non-browser client; not a CSWSH vector
+    const host = info.req && info.req.headers && info.req.headers.host;
+    try {
+      if (new URL(origin).host === host) return true;
+    } catch { /* malformed Origin -> reject */ }
+    console.log(chalk.yellow(`🚫 Rejected cross-origin WebSocket from ${origin} (host: ${host})`));
+    return false;
   }
 
   /**

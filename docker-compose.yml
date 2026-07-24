@@ -16,6 +16,10 @@ services:
     environment:
       - NODE_ENV=production
       - NODE_OPTIONS=--max-old-space-size=1024
+      # Bind all interfaces INSIDE the container so Docker's port-forwarding
+      # (arrives on eth0, not loopback) reaches the app. Safe: the host-side
+      # mapping above is 127.0.0.1-only and start-secure.sh blocks egress.
+      - CHATS_HOST=0.0.0.0
       - HOME=${HOME}
       - CLAUDE_HOME=${HOME}/.claude
       - CLAUDE_DB_PATH=/data/conversations.db

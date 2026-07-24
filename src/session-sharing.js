@@ -439,9 +439,20 @@ class SessionSharing {
     const projectDir = path.join(claudeDir, 'projects', projectDirName);
     await fs.ensureDir(projectDir);
 
-    // Generate conversation filename with original ID
+    // Generate conversation filename with original ID.
+    // The id comes from an untrusted downloaded session, so it must not be able
+    // to steer the write outside projectDir. Allow only filename-safe characters
+    // (no path separators, no traversal), then assert containment as defense in
+    // depth — the same pattern the MCP server uses for transcript reads.
     const conversationId = sessionData.conversation.id;
+    if (typeof conversationId !== 'string' || !/^[A-Za-z0-9._-]+$/.test(conversationId) || conversationId.includes('..')) {
+      throw new Error(`Invalid session file - unsafe conversation id: ${JSON.stringify(conversationId)}`);
+    }
     const conversationFile = path.join(projectDir, `${conversationId}.jsonl`);
+    const resolvedRoot = path.resolve(projectDir);
+    if (!path.resolve(conversationFile).startsWith(resolvedRoot + path.sep)) {
+      throw new Error('Invalid session file - conversation id escapes the project directory');
+    }
 
     // Convert messages back to JSONL format (one JSON object per line)
     const jsonlContent = sessionData.messages
