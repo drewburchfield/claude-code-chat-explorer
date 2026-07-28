@@ -1217,6 +1217,63 @@
             padding-left: 36px;
         }
 
+        /* "Automated runs" cluster: headless SDK sessions outnumber
+           interactive ones inside a project folder, so they collapse behind a
+           sub-header. Deliberately quieter than .project-header - no avatar, no
+           sticky positioning, muted text - so it reads as a divider inside the
+           group rather than a second group. */
+        .cluster-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 20px 8px 36px;
+            background: var(--bg-primary);
+            border-bottom: 1px solid var(--border-primary);
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+        }
+
+        .cluster-header:hover {
+            background: var(--bg-secondary);
+        }
+
+        .cluster-label {
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+
+        .cluster-count {
+            color: var(--text-secondary);
+            background: var(--bg-tertiary);
+            font-size: 0.75rem;
+            font-weight: 500;
+            padding: 1px 8px;
+            border-radius: 10px;
+        }
+
+        .cluster-toggle {
+            margin-left: auto;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+        }
+
+        .cluster-toggle-icon {
+            transition: transform 0.2s ease;
+        }
+
+        .cluster-toggle-icon.expanded {
+            transform: rotate(180deg);
+        }
+
+        /* Cluster members sit one level deeper than their sub-header. */
+        .project-group .conversation-item.automated-item {
+            padding-left: 52px;
+        }
+
         .conversation-state {
             font-size: 0.7rem;
             padding: 3px 8px;
@@ -3200,6 +3257,12 @@
                 if (!this.expandedProjects) {
                     this.expandedProjects = new Set(); // All collapsed by default
                 }
+                // Automated-run clusters, keyed by project name. Separate from
+                // expandedProjects so a project can be open with its cluster
+                // still folded. Collapsed on every page load by design.
+                if (!this.expandedClusters) {
+                    this.expandedClusters = new Set();
+                }
 
                 // Render grouped conversations
                 const today = new Date();
@@ -3208,9 +3271,33 @@
                 conversationsList.innerHTML = sortedProjects.map(projectName => {
                     const projectConversations = groupedByProject[projectName].conversations;
                     const isExpanded = this.expandedProjects.has(projectName);
+                    const clusterExpanded = this.expandedClusters.has(projectName);
                     const firstLetter = projectName.charAt(0).toUpperCase();
+
+                    // Split the project's rows into the interactive stream and
+                    // the automated (headless SDK) cluster. Subagent rows are
+                    // NOT a third stream: the server emits each parent
+                    // immediately followed by its children, and splitting them
+                    // out would orphan them from their parent. Each child
+                    // instead follows its parent into whichever stream the
+                    // parent landed in, so subagent rendering and ordering are
+                    // exactly what they were before.
+                    const interactive = [];
+                    const automated = [];
+                    const streamByParentId = new Map();
+                    for (const conv of projectConversations) {
+                        if (conv.isSubagent) {
+                            (streamByParentId.get(conv.parentId) || interactive).push(conv);
+                        } else {
+                            const stream = conv.isHeadless ? automated : interactive;
+                            stream.push(conv);
+                            streamByParentId.set(conv.id, stream);
+                        }
+                    }
+
                     // Count sessions excluding subagents (always, regardless of checkbox)
-                    const sessionCount = projectConversations.filter(c => !c.isSubagent).length;
+                    const sessionCount = interactive.filter(c => !c.isSubagent).length;
+                    const automatedCount = automated.filter(c => !c.isSubagent).length;
                     // Format temporal info
                     const latestActivity = groupedByProject[projectName].latestActivity;
                     const fullDate = this.formatFullDate(latestActivity);
@@ -3221,8 +3308,18 @@
                     const isToday = activityDate.getTime() === today.getTime();
                     const todayClass = isToday ? ' today-activity' : '';
 
-                    // Render conversations for this project
-                    const conversationsHTML = projectConversations.map(conv => {
+                    // Element-content vs attribute need different escaping: the
+                    // name is rendered as text AND used in data-project="...".
+                    // Declared before the row/cluster markup below, which reads
+                    // projectNameAttr.
+                    const escapedProjectName = this.escapeHtml(projectName);
+                    const projectNameAttr = this.escapeAttr(projectName);
+
+                    // Render one conversation row. `visible` decides only the
+                    // inline display; the markup (classes, badges, data
+                    // attributes) is identical for interactive and automated
+                    // rows so click delegation and styling stay uniform.
+                    const renderRow = (conv, visible, inCluster) => {
                         const state = states[conv.id] || 'inactive';
                         const stateClass = this.getStateClass(state);
                         const stateLabel = this.getStateLabel(state);
@@ -3246,9 +3343,10 @@
                         // interpolated into markup. Interactive CLI is the
                         // norm and gets no badge.
                         const sourceBadge = this.getSourceBadge(conv);
+                        const clusterClass = inCluster ? ' automated-item' : '';
 
                         return `
-                            <div class="conversation-item${subagentClass}${stubClass}" data-conversation-id="${this.escapeAttr(conv.id)}" style="display: ${isExpanded ? 'flex' : 'none'}">
+                            <div class="conversation-item${subagentClass}${stubClass}${clusterClass}" data-conversation-id="${this.escapeAttr(conv.id)}" style="display: ${visible ? 'flex' : 'none'}">
                                 <div class="conversation-avatar conversation-avatar-small">
                                     ${conversationId.substring(0, 2).toUpperCase()}
                                 </div>
@@ -3265,12 +3363,31 @@
                                 </div>
                             </div>
                         `;
-                    }).join('');
+                    };
 
-                    // Element-content vs attribute need different escaping: the
-                    // name is rendered as text AND used in data-project="...".
-                    const escapedProjectName = this.escapeHtml(projectName);
-                    const projectNameAttr = this.escapeAttr(projectName);
+                    const interactiveHTML = interactive
+                        .map(conv => renderRow(conv, isExpanded, false)).join('');
+
+                    // The cluster sub-header follows the project group's own
+                    // expansion; its members additionally need the cluster
+                    // open. Label and count are static text and a number, so
+                    // nothing transcript-controlled is interpolated here.
+                    const clusterHTML = automated.length > 0
+                        ? `
+                            <div class="cluster-header" data-project="${projectNameAttr}" style="display: ${isExpanded ? 'flex' : 'none'}">
+                                <span class="cluster-label">Automated runs</span>
+                                <span class="cluster-count">${automatedCount}</span>
+                                <span class="cluster-toggle">
+                                    <svg class="cluster-toggle-icon ${clusterExpanded ? 'expanded' : ''}" width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                        <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/>
+                                    </svg>
+                                </span>
+                            </div>
+                          ` + automated.map(conv => renderRow(conv, isExpanded && clusterExpanded, true)).join('')
+                        : '';
+
+                    const conversationsHTML = interactiveHTML + clusterHTML;
+
                     return `
                         <div class="project-group${todayClass}" data-project="${projectNameAttr}">
                             <div class="project-header${todayClass}" data-project="${projectNameAttr}">
@@ -3281,7 +3398,7 @@
                                     <div class="project-name">${escapedProjectName}</div>
                                     <div class="project-meta">
                                         <span class="project-date">${fullDate} · ${relativeTime}</span>
-                                        <span class="project-sessions">${sessionCount} session${sessionCount !== 1 ? 's' : ''}</span>
+                                        <span class="project-sessions">${sessionCount} session${sessionCount !== 1 ? 's' : ''}${automatedCount > 0 ? ` · ${automatedCount} automated` : ''}</span>
                                     </div>
                                 </div>
                                 <div class="project-toggle">
@@ -3303,6 +3420,17 @@
                     });
                 });
 
+                // Bind automated-cluster toggles. The sub-header is a SIBLING of
+                // .project-header, so the project handler above cannot fire for
+                // it; stopPropagation is belt-and-braces against the group ever
+                // becoming clickable itself.
+                conversationsList.querySelectorAll('.cluster-header').forEach(header => {
+                    header.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        this.toggleAutomatedCluster(header.dataset.project);
+                    });
+                });
+
                 // Bind conversation click events
                 conversationsList.querySelectorAll('.conversation-item').forEach(item => {
                     item.addEventListener('click', () => {
@@ -3320,6 +3448,21 @@
                 }
 
                 // Re-render conversations with current states
+                this.renderConversations(this.conversations, this.conversationStates);
+            }
+
+            /**
+             * Fold/unfold a project's "Automated runs" cluster. Independent of
+             * expandedProjects: a project stays open while its cluster folds.
+             * @param {string} projectName - Group key, from data-project
+             */
+            toggleAutomatedCluster(projectName) {
+                if (this.expandedClusters.has(projectName)) {
+                    this.expandedClusters.delete(projectName);
+                } else {
+                    this.expandedClusters.add(projectName);
+                }
+
                 this.renderConversations(this.conversations, this.conversationStates);
             }
 
@@ -4072,6 +4215,10 @@
                 if (!term) {
                     // If search is empty, collapse all projects and reset
                     this.expandedProjects.clear(); // Close all projects
+                    // Clusters live inside those projects, so they collapse too;
+                    // otherwise a re-render would reopen a cluster under a
+                    // project the user just saw close.
+                    if (this.expandedClusters) this.expandedClusters.clear();
 
                     projectGroups.forEach(group => {
                         group.style.display = 'block';
@@ -4080,6 +4227,11 @@
                         const conversations = group.querySelectorAll('.conversation-item');
                         conversations.forEach(conv => {
                             conv.style.display = 'none';
+                        });
+
+                        // ...and the automated-run sub-headers with them
+                        group.querySelectorAll('.cluster-header').forEach(header => {
+                            header.style.display = 'none';
                         });
 
                         // Update toggle icon to collapsed state
@@ -4096,6 +4248,13 @@
                     const projectName = group.dataset.project;
                     const projectNameLower = projectName.toLowerCase();
                     const conversations = group.querySelectorAll('.conversation-item');
+
+                    // A filtered list is flat: matches show wherever they live,
+                    // so the cluster sub-header (whose chevron would no longer
+                    // describe what is on screen) steps out of the way.
+                    group.querySelectorAll('.cluster-header').forEach(header => {
+                        header.style.display = 'none';
+                    });
 
                     let hasMatchingConversation = false;
 
@@ -5195,6 +5354,9 @@
                 // Reset expanded projects state (close all projects)
                 if (this.expandedProjects) {
                     this.expandedProjects.clear();
+                }
+                if (this.expandedClusters) {
+                    this.expandedClusters.clear();
                 }
 
                 // Hide search results info
