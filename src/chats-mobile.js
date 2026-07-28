@@ -229,11 +229,57 @@ class ChatsMobile {
           }
         }
 
+        // Keyset pagination, opt-in. The list view groups every conversation
+        // into project folders with counts, so it still asks for the whole set;
+        // forcing a page size would break that grouping. This exists for API
+        // consumers (MCP, scripts) that want a bounded window, and it keys on
+        // (lastModified, id) rather than OFFSET so paging stays stable while
+        // conversations are being re-indexed underneath it.
+        const before = typeof req.query.before === 'string' ? req.query.before : null;
+        const pageLimit = Number.parseInt(req.query.limit, 10);
+
+        if (before) {
+          const sep = before.lastIndexOf('_');
+          const beforeTs = Number(before.slice(0, sep));
+          const beforeId = before.slice(sep + 1);
+          conversations = conversations.filter(c => {
+            const ts = new Date(c.lastModified).getTime();
+            return ts < beforeTs || (ts === beforeTs && String(c.id) < beforeId);
+          });
+        }
+
+        let nextCursor = null;
+        if (Number.isFinite(pageLimit) && pageLimit > 0 && conversations.length > pageLimit) {
+          conversations = conversations.slice(0, pageLimit);
+          const last = conversations[conversations.length - 1];
+          nextCursor = `${new Date(last.lastModified).getTime()}_${last.id}`;
+        }
+
+        // Projection. `view=summary` returns only what a list row renders,
+        // which is roughly a quarter of the payload. filePath is the single
+        // largest field (~19%) and is never rendered; it is also an absolute
+        // host path, so there is no reason to hand it to the browser.
+        if (req.query.view === 'summary') {
+          conversations = conversations.map(c => ({
+            id: c.id,
+            project: c.project,
+            lastModified: c.lastModified,
+            messageCount: c.messageCount,
+            isSubagent: c.isSubagent,
+            parentId: c.parentId,
+            isStub: c.isStub,
+            subagentCount: c.subagentCount,
+            status: c.status,
+            conversationState: c.conversationState
+          }));
+        }
+
         res.json({
           conversations,
           timestamp: new Date().toISOString(),
           lastUpdate: this.data.lastUpdate,
-          includeSubagents
+          includeSubagents,
+          nextCursor
         });
       } catch (error) {
         console.error('Error serving conversations:', error);

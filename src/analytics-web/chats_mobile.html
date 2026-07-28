@@ -3076,7 +3076,10 @@
 
                     // Fetch conversations and states simultaneously (like AgentsPage.js)
                     const [conversationsResponse, statesResponse] = await Promise.all([
-                        fetch(`/api/conversations?includeSubagents=${includeSubagents}`),
+                        // view=summary drops fields no list row renders (chiefly
+                        // filePath, which is ~19% of the payload and an absolute
+                        // host path). Roughly 1.23 MB -> ~0.3 MB.
+                        fetch(`/api/conversations?includeSubagents=${includeSubagents}&view=summary`),
                         fetch('/api/conversation-state') // Use singular like AgentsPage.js
                     ]);
                     

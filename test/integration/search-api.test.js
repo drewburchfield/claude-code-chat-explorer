@@ -112,4 +112,45 @@ describe('SearchService REST surface', () => {
     const ids = res.body.results.map(r => r.id);
     expect(ids).toEqual(['b']);
   });
+
+  describe('GET /api/conversations projection and paging', () => {
+    it('returns the full record by default (unchanged for existing consumers)', async () => {
+      const res = await request(app.app).get('/api/conversations').expect(200);
+      expect(res.body.conversations.length).toBeGreaterThan(0);
+      expect(res.body.conversations[0]).toHaveProperty('filePath');
+    });
+
+    it('view=summary omits filePath and other fields no list row renders', async () => {
+      const res = await request(app.app).get('/api/conversations?view=summary').expect(200);
+      const row = res.body.conversations[0];
+      // filePath is the largest single field and an absolute host path; it must
+      // not reach the browser in the summary view.
+      expect(row).not.toHaveProperty('filePath');
+      expect(row).not.toHaveProperty('toolUsage');
+      // ...but everything a row actually renders is still present.
+      expect(row).toHaveProperty('id');
+      expect(row).toHaveProperty('project');
+      expect(row).toHaveProperty('lastModified');
+      expect(row).toHaveProperty('messageCount');
+    });
+
+    it('limit caps the page and returns a cursor; before= walks without overlap', async () => {
+      const first = await request(app.app).get('/api/conversations?limit=1').expect(200);
+      expect(first.body.conversations).toHaveLength(1);
+      expect(first.body.nextCursor).toBeTruthy();
+
+      const second = await request(app.app)
+        .get(`/api/conversations?limit=1&before=${encodeURIComponent(first.body.nextCursor)}`)
+        .expect(200);
+
+      // Keyset, not OFFSET: the second page must not repeat the first row.
+      const firstId = first.body.conversations[0].id;
+      expect(second.body.conversations.map(c => c.id)).not.toContain(firstId);
+    });
+
+    it('omits nextCursor when the whole set fits in the page', async () => {
+      const res = await request(app.app).get('/api/conversations?limit=1000').expect(200);
+      expect(res.body.nextCursor).toBeNull();
+    });
+  });
 });
