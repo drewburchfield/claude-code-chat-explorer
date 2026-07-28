@@ -6085,7 +6085,7 @@
                             font-family: monospace;
                             color: var(--text-primary);
                         ">
-                            <span>${usage.model}</span>
+                            <span>${this.escapeHtml(usage.model)}</span>
                             <span style="
                                 padding: 2px 6px;
                                 background: rgba(139, 92, 246, 0.3);
@@ -6113,7 +6113,7 @@
                         return `
                             <div style="margin-bottom: 10px; padding: 8px; background: rgba(255,255,255,0.03); border-radius: 6px;">
                                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-                                    <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">${tool}</span>
+                                    <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">${this.escapeHtml(tool)}</span>
                                     <span style="font-size: 12px; color: var(--text-secondary);">${count} calls (${percentage}%)</span>
                                 </div>
                                 <div style="height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;">
@@ -6192,7 +6192,7 @@
                                     font-size: 12px;
                                     color: var(--text-primary);
                                 ">
-                                    <span>${agent.type}</span>
+                                    <span>${this.escapeHtml(agent.type)}</span>
                                     <span style="color: var(--text-secondary); font-size: 11px;">×${agent.count}</span>
                                 </span>
                             `;
@@ -6219,7 +6219,7 @@
                                     font-family: monospace;
                                     color: var(--text-primary);
                                 ">
-                                    <span>${cmd.name}</span>
+                                    <span>${this.escapeHtml(cmd.name)}</span>
                                     <span style="color: var(--text-secondary); font-size: 11px;">×${cmd.count}</span>
                                 </span>
                             `;
@@ -6245,7 +6245,7 @@
                                     font-size: 12px;
                                     color: var(--text-primary);
                                 ">
-                                    <span>${skill.name}</span>
+                                    <span>${this.escapeHtml(skill.name)}</span>
                                     <span style="color: var(--text-secondary); font-size: 11px;">×${skill.count}</span>
                                 </span>
                             `;

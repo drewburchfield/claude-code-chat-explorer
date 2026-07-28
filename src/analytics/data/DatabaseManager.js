@@ -19,6 +19,14 @@ const chalk = require('chalk');
 const CONTENT_VERSION = 4;
 
 /**
+ * How many files may sit below CONTENT_VERSION before search reports itself
+ * incomplete. A genuine rebuild leaves thousands stale; a few permanently
+ * unparseable transcripts should not keep the "still indexing" warning on
+ * forever, which is the stuck-flag failure this project has already hit once.
+ */
+const STALE_FILE_NOISE_FLOOR = 25;
+
+/**
  * DatabaseManager - SQLite + FTS5 backend for efficient conversation storage and search
  *
  * Replaces the in-memory loading approach with a persistent indexed database.
@@ -492,11 +500,24 @@ class DatabaseManager {
    * @param {number} convNo
    * @private
    */
+  /**
+   * Both operands need an explicit CAST. `value` is a TEXT column, and SQLite
+   * sorts INTEGER before TEXT, so MAX(<int>, <text>) returns the TEXT operand
+   * whatever its magnitude: MAX(CAST('100' AS INTEGER), '5') is '5'. Casting
+   * only the left side made this column "last freed" instead of "highest
+   * freed", so it ratcheted DOWN and made conv_no reuse MORE likely, which is
+   * the opposite of what it exists for. Binding a JS number does not help
+   * either, because TEXT column affinity converts it on the way in.
+   *
+   * @param {number} convNo
+   * @private
+   */
   _raiseConvSeqHighWater(convNo) {
     try {
       this.db.prepare(`
         INSERT INTO conv_seq_meta (key, value) VALUES ('high_water', ?)
-        ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), excluded.value)
+        ON CONFLICT(key) DO UPDATE
+          SET value = MAX(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER))
       `).run(String(convNo));
     } catch { /* best-effort; allocation still works off MAX(conv_no) */ }
   }
@@ -516,10 +537,16 @@ class DatabaseManager {
 
   hasPendingRebuild() {
     try {
-      const row = this.db.prepare(
-        `SELECT 1 FROM file_index WHERE content_version < ? LIMIT 1`
+      // Counting, not existence. A file that can never be parsed keeps
+      // content_version at 0 forever (the indexer's per-file catch does not
+      // touch the row), so a bare EXISTS check pinned "still indexing" on
+      // permanently and the warning became noise. A handful of poison files
+      // is a different condition from a rebuild in flight, and only the
+      // second one should tell the user their results are incomplete.
+      const { n } = this.db.prepare(
+        `SELECT COUNT(*) AS n FROM file_index WHERE content_version < ?`
       ).get(CONTENT_VERSION);
-      return !!row;
+      return n > STALE_FILE_NOISE_FLOOR;
     } catch {
       // A missing column or unreadable table is itself a reason not to claim
       // the index is complete.
@@ -841,7 +868,10 @@ class DatabaseManager {
       const safeQuery = this._escapeFtsQuery(query);
       const rows = stmt.all(safeQuery, limit, offset);
 
-      // ONE batched snippet query for all rows, never one per row.
+      // One snippet lookup per returned row, each of them index-driven.
+      // (An earlier note here claimed this was a single batched query. It
+      // is not: it is still N queries for N rows. What changed is the SHAPE
+      // of each query, which is where the cost was.)
       //
       // The per-row form was `WHERE message_fts MATCH ? AND
       // message_fts.conversation_id = ?`. conversation_id is UNINDEXED and, in

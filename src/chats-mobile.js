@@ -239,7 +239,17 @@ class ChatsMobile {
         // conversations are being re-indexed underneath it.
         const before = typeof req.query.before === 'string' ? req.query.before : null;
         const pageLimit = Number.parseInt(req.query.limit, 10);
-        const paging = before !== null || Number.isFinite(pageLimit);
+        const paging = before !== null || req.query.limit !== undefined;
+
+        // Validate before doing any work. `limit=garbage`, `limit=0` and
+        // negatives previously fell through as unpaged or no-op requests after
+        // the whole corpus had already been materialized.
+        if (req.query.limit !== undefined && (!Number.isFinite(pageLimit) || pageLimit < 1)) {
+          return res.status(400).json({
+            error: 'Invalid limit',
+            detail: 'limit must be a positive integer'
+          });
+        }
 
         // Paging and subagent grouping are incompatible: grouping interleaves
         // each parent with its children, and the (lastModified, id) ordering
@@ -277,8 +287,14 @@ class ChatsMobile {
         }
 
         if (before) {
-          const sep = before.lastIndexOf('_');
-          const beforeTs = sep === -1 ? NaN : Number(before.slice(0, sep));
+          // Split on the FIRST separator and require the prefix to be digits.
+          // lastIndexOf broke every id containing an underscore, and this repo
+          // builds subagent ids exactly that way (`<parentId>_agent-<id>`):
+          // "1700000000000_abc_agent-1" parsed a timestamp of
+          // "1700000000000_abc", which is NaN, so paging 400'd on those rows.
+          const sep = before.indexOf('_');
+          const tsPart = sep === -1 ? '' : before.slice(0, sep);
+          const beforeTs = /^\d+$/.test(tsPart) ? Number(tsPart) : NaN;
           const beforeId = sep === -1 ? '' : before.slice(sep + 1);
           // A malformed cursor must not silently return the whole list as if
           // paging had been applied.
@@ -1511,7 +1527,10 @@ class ChatsMobile {
         // Use database backend if available (much faster, lower memory)
         if (this.useDatabaseBackend && this.databaseBackend.isInitialized) {
           console.log(chalk.cyan('📦 Loading conversations from SQLite database...'));
-          conversations = this.databaseBackend.getConversations({ limit: 10000 });
+          conversations = this.databaseBackend.getConversations({ limit: Number.MAX_SAFE_INTEGER });
+          // No 10,000 cap here either: this list backs /api/search's browse
+          // and metadata-filter path, so capping it silently hid every
+          // conversation older than the newest 10,000 from those searches.
 
           // Initialize message counts from database (already indexed).
           // We mark every conversation as "ever seen" so the diff path

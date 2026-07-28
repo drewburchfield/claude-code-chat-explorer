@@ -179,6 +179,22 @@ describe('SearchService REST surface', () => {
       await request(app.app).get('/api/conversations?limit=5&includeSubagents=true').expect(400);
     });
 
+    it('round-trips a cursor whose id contains underscores', async () => {
+      // Subagent ids are built as `<parentId>_agent-<id>`, so lastIndexOf('_')
+      // parsed a timestamp of "<ts>_<parentId>", which is NaN, and paging 400'd
+      // on exactly those rows. Split on the FIRST separator instead.
+      const res = await request(app.app)
+        .get('/api/conversations?limit=1&before=' + encodeURIComponent('9999999999999_abc_agent-1'))
+        .expect(200);
+      expect(Array.isArray(res.body.conversations)).toBe(true);
+    });
+
+    it('rejects a non-positive or non-numeric limit', async () => {
+      await request(app.app).get('/api/conversations?limit=0').expect(400);
+      await request(app.app).get('/api/conversations?limit=-3').expect(400);
+      await request(app.app).get('/api/conversations?limit=garbage').expect(400);
+    });
+
     it('rejects a malformed cursor instead of silently returning everything', async () => {
       // Without the guard a bad cursor parsed to NaN, every comparison was
       // false, and the caller got the whole list back looking like a page.

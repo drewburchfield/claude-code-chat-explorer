@@ -94,7 +94,7 @@ class SearchService {
     if (hasQuery && typeof this.db.hasPendingRebuild === 'function') {
       try {
         if (this.db.hasPendingRebuild()) degraded = true;
-      } catch { /* treated as not-degraded; the search itself still succeeded */ }
+      } catch { /* hasPendingRebuild already fails closed internally; unreachable */ }
     }
 
     const filtered = this._applyFilters(candidates, {

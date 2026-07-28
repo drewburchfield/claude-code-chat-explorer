@@ -607,33 +607,52 @@ describe('DatabaseManager', () => {
   });
 
   describe('search index maintenance and conv_no allocation', () => {
-    it('reports a pending rebuild while any file is below the content version', () => {
-      db.db.prepare(
+    it('reports a pending rebuild for a real backlog, but not for a few poison files', () => {
+      const put = db.db.prepare(
         `INSERT OR REPLACE INTO file_index (file_path, mtime, size, indexed_at, content_version) VALUES (?,?,?,?,?)`
-      ).run('/stale2.jsonl', 1, 2, 3, 0);
+      );
+
+      // A handful of permanently unparseable transcripts must NOT flag. The
+      // indexer's per-file catch never updates content_version, so those rows
+      // sit below the target forever; an existence check pinned "still
+      // indexing" on permanently and the warning became noise.
+      for (let i = 0; i < 5; i++) put.run(`/poison-${i}.jsonl`, 1, 2, 3, 0);
+      expect(db.hasPendingRebuild()).toBe(false);
+
+      // A genuine rebuild leaves thousands stale, and that must flag.
+      for (let i = 0; i < 100; i++) put.run(`/backlog-${i}.jsonl`, 1, 2, 3, 0);
       expect(db.hasPendingRebuild()).toBe(true);
 
       db.db.prepare(`UPDATE file_index SET content_version = 4`).run();
       expect(db.hasPendingRebuild()).toBe(false);
     });
 
-    it('never reuses a conv_no after a conversation is removed', () => {
+    it('never reuses a conv_no, even when a LOW number is freed after a high one', () => {
       const mk = (id) => db.upsertConversation(
         { id, filePath: `/p/${id}.jsonl`, filename: `${id}.jsonl`, project: 'p',
           messageCount: 1, fileSize: 1, lastModified: new Date(), created: new Date() },
         `content for ${id}`
       );
-      mk('cn-a'); mk('cn-b');
-      const bNo = db.db.prepare(`SELECT conv_no FROM conv_seq WHERE conversation_id='cn-b'`).get().conv_no;
+      mk('cn-a'); mk('cn-b'); mk('cn-c');
+      const nos = ['cn-a', 'cn-b', 'cn-c'].map(id =>
+        db.db.prepare(`SELECT conv_no FROM conv_seq WHERE conversation_id=?`).get(id).conv_no);
+      const highest = Math.max(...nos);
 
-      db.removeConversation('cn-b');
-      mk('cn-c');
-      const cNo = db.db.prepare(`SELECT conv_no FROM conv_seq WHERE conversation_id='cn-c'`).get().conv_no;
+      // Order matters. Freeing the HIGHEST first and then a LOWER one is what
+      // exposes a high-water mark that stores "last freed" instead of "highest
+      // freed": an earlier version cast only one side of MAX(), and because
+      // SQLite sorts INTEGER before TEXT it ratcheted DOWN and handed the freed
+      // high number straight back out. Deleting only the highest (as this test
+      // originally did) passes against that broken code.
+      db.removeConversation('cn-c');   // highest
+      db.removeConversation('cn-a');   // lower
 
-      // A freed number must not be handed out again: a stale contentless FTS
-      // row attached to a reused conv_no would surface as another
-      // conversation's content.
-      expect(cNo).toBeGreaterThan(bNo);
+      mk('cn-d');
+      const dNo = db.db.prepare(`SELECT conv_no FROM conv_seq WHERE conversation_id='cn-d'`).get().conv_no;
+
+      // A stale contentless conversation_fts row sitting at a reused rowid
+      // would surface as another conversation's content.
+      expect(dNo).toBeGreaterThan(highest);
     });
 
     it('merges FTS segments without throwing', () => {
