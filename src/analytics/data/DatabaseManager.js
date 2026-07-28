@@ -761,16 +761,41 @@ class DatabaseManager {
       const safeQuery = this._escapeFtsQuery(query);
       const rows = stmt.all(safeQuery, limit, offset);
 
-      // Snippets only for the page actually being returned, not the whole
-      // candidate set. Best-effort: a conversation can match across messages
-      // without any single message matching, in which case there is no snippet.
-      const snippetStmt = this.db.prepare(`
-        SELECT snippet(message_fts, 4, '{{MATCH}}', '{{/MATCH}}', '...', 20) AS snippet
-        FROM message_fts
-        WHERE message_fts MATCH ? AND message_fts.conversation_id = ?
-        ORDER BY bm25(message_fts)
-        LIMIT 1
-      `);
+      // ONE batched snippet query for all rows, never one per row.
+      //
+      // The per-row form was `WHERE message_fts MATCH ? AND
+      // message_fts.conversation_id = ?`. conversation_id is UNINDEXED and, in
+      // external-content mode, is not stored in the FTS table at all, so FTS5
+      // could not consume that equality: each call scanned every message
+      // matching the term, did a rowid lookup per hit to read conversation_id,
+      // and sorted the lot for a LIMIT 1. Callers pass a candidate limit of
+      // 2000, so a common term issued up to 2000 of those scans. Measured on
+      // the real store: "websocket" took 9.4 s and "the" did not finish inside
+      // 300 s. That is the same pathology this schema change removed from the
+      // write path, relocated to the read path.
+      //
+      // Joining through `messages` makes the conversation filter index-driven,
+      // and dropping ORDER BY bm25 removes a temp b-tree sort: any matching
+      // message is an acceptable preview.
+      const snippetsFor = (ids) => {
+        const out = new Map();
+        if (!ids.length) return out;
+        const CHUNK = 400; // keep well under SQLITE_MAX_VARIABLE_NUMBER
+        for (let i = 0; i < ids.length; i += CHUNK) {
+          const slice = ids.slice(i, i + CHUNK);
+          const placeholders = slice.map(() => '?').join(',');
+          const rows = this.db.prepare(`
+            SELECT m.conversation_id AS cid,
+                   snippet(message_fts, 4, '{{MATCH}}', '{{/MATCH}}', '...', 20) AS snippet
+            FROM message_fts
+            JOIN messages m ON m.id = message_fts.rowid
+            WHERE message_fts MATCH ? AND m.conversation_id IN (${placeholders})
+            GROUP BY m.conversation_id
+          `).all(safeQuery, ...slice);
+          for (const r of rows) if (!out.has(r.cid)) out.set(r.cid, r.snippet);
+        }
+        return out;
+      };
 
       // Fallback preview for a conversation that matched ACROSS messages: every
       // term is present somewhere, but no single message holds them all, so the
@@ -781,27 +806,42 @@ class DatabaseManager {
         FROM messages WHERE conversation_id = ? ORDER BY seq LIMIT 1
       `);
 
-      return rows.map(row => {
-        let snippet = null;
-        try {
-          snippet = snippetStmt.get(safeQuery, row.id)?.snippet ?? null;
-        } catch {
-          // A query shape valid at conversation level may not resolve per
-          // message; the result is still valid, just without a preview.
-        }
-        if (!snippet) {
-          try {
-            const p = previewStmt.get(row.id)?.preview;
-            if (p) snippet = p + '...';
-          } catch { /* preview is best-effort */ }
-        }
-        return {
+      let snippetMap = new Map();
+      let snippetsFailed = false;
+      try {
+        snippetMap = snippetsFor(rows.map(r => r.id));
+      } catch (e) {
+        // Both tables are fed the same escaped query through the same FTS5
+        // parser, so a query valid at conversation level is valid per message.
+        // What is left here is a real failure (I/O, corruption, SQLITE_BUSY),
+        // which must not be silently downgraded to "no preview".
+        snippetsFailed = true;
+        console.error(chalk.red(`⚠️ Snippet lookup failed for "${query}": ${e.message}`));
+      }
+
+      const out = rows.map(row => {
+        const snippet = snippetMap.get(row.id) ?? null;
+        const result = {
           ...this._rowToConversation(row),
           relevance: row.relevance,
           snippet,
           searchTerm: query
         };
+        if (!snippet) {
+          // Cross-message match: every term is present in the conversation but
+          // no single message holds them all. Show the opening of the
+          // conversation so the row is not blank, flagged so callers do not
+          // present non-matching text as if it were the match.
+          try {
+            const p = previewStmt.get(row.id)?.preview;
+            if (p) { result.snippet = p + '...'; result.snippetIsPreview = true; }
+          } catch { /* preview is best-effort */ }
+        }
+        return result;
       });
+
+      if (snippetsFailed) out._searchDegraded = true;
+      return out;
     } catch (err) {
       console.error(chalk.red(`⚠️ FTS5 snippet search failed for query "${query}": ${err.message}`));
       console.error(chalk.gray('   Falling back to basic search without snippets.'));
