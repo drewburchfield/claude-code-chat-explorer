@@ -81,6 +81,18 @@ class Indexer {
             await this._indexFile(filePath, fileStats);
             stats.filesIndexed++;
 
+            // Hand the event loop back after every file we actually indexed.
+            // _indexFile is CPU-bound and synchronous inside (JSON.parse per
+            // line plus better-sqlite3 writes), so without this the HTTP server
+            // sharing this loop is starved: a request needs several loop turns
+            // to complete and each one queues behind another file. Measured on
+            // a ~4 GB store, serving the static index page took 27 s during a
+            // reindex. setImmediate runs pending I/O callbacks before the next
+            // file, which costs microseconds per file and keeps the UI usable.
+            // Only on the indexed path: skipped files are cheap and already
+            // yield via the awaited fs.stat above.
+            await new Promise(resolve => setImmediate(resolve));
+
           } catch (err) {
             console.warn(chalk.yellow(`Warning: Could not process ${path.basename(filePath)}: ${err.message}`));
             stats.errors++;
