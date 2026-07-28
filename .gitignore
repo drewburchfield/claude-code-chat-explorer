@@ -53,6 +53,10 @@ dogfood-output/
 *-report.md
 sec_review_*.md
 
+# Braintrust consult artifacts (goal cards, peer sessions). Local working
+# notes, and they quote machine-specific measurements.
+.braintrust/
+
 # Private / work-in-progress notes. This repo is public: keep local thinking,
 # drafts, and anything with personal or client detail out of it.
 #
