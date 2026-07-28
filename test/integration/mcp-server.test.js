@@ -108,6 +108,41 @@ describe('MCP server', () => {
     expect(within.isError).toBe(true);
   });
 
+  it('refuses to follow a symlink planted inside the transcript root', async () => {
+    // The lexical check (path.resolve) passes here: the indexed path really is
+    // under projectsDir. Only resolving the real path catches that it points
+    // out of the tree. Without realpath this reads an arbitrary file.
+    const secretDir = path.join(claudeDir, 'outside-the-root');
+    await fs.ensureDir(secretDir);
+    const secretFile = path.join(secretDir, 'secret.jsonl');
+    await fs.writeFile(secretFile, JSON.stringify({
+      type: 'user', message: { role: 'user', content: 'TOPSECRETTOKEN' },
+    }));
+
+    const linkPath = path.join(projectsDir, '-proj', 'linked.jsonl');
+    try {
+      await fs.symlink(secretFile, linkPath);
+    } catch (err) {
+      // Symlink creation can be unavailable (e.g. Windows without privileges).
+      if (err.code === 'EPERM' || err.code === 'ENOSYS') return;
+      throw err;
+    }
+
+    db.upsertConversation(createMockConversation({ id: 'symlinked', filePath: linkPath }), 'x');
+
+    await expect(
+      client.readResource({ uri: 'claude-chat://conversation/symlinked' })
+    ).rejects.toThrow(/outside the configured root/);
+
+    const within = await client.callTool({
+      name: 'search_within_conversation',
+      arguments: { conversationId: 'symlinked', query: 'TOPSECRETTOKEN' },
+    });
+    expect(within.isError).toBe(true);
+    // The secret must not appear in the error payload either.
+    expect(JSON.stringify(within)).not.toContain('TOPSECRETTOKEN');
+  });
+
   it('returns a tool error for an unknown conversation', async () => {
     const res = await client.callTool({
       name: 'search_within_conversation',
