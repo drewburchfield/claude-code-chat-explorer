@@ -607,29 +607,35 @@ describe('DatabaseManager', () => {
   });
 
   describe('FTS content version migration', () => {
-    it('initializes a fresh database at the current target version (3)', () => {
-      expect(db.db.pragma('user_version', { simple: true })).toBe(3);
+    it('initializes a fresh database at the current target version (4)', () => {
+      expect(db.db.pragma('user_version', { simple: true })).toBe(4);
     });
 
-    it('clears file_index and bumps version, but preserves FTS for graceful degradation', () => {
-      // Simulate an older index: roll the version back and seed stale rows.
+    it('marks files stale on a bump but KEEPS file_index so a rebuild resumes', () => {
+      // Simulate an older index: roll the version back and seed a stale row.
       db.db.pragma('user_version = 1');
       db.db.prepare(
-        `INSERT INTO file_index (file_path, mtime, size, indexed_at) VALUES (?, ?, ?, ?)`
-      ).run('/stale/file.jsonl', 123, 456, 789);
-      db.db.prepare(
-        `INSERT INTO conversation_fts (conversation_id, content, project) VALUES (?, ?, ?)`
-      ).run('stale-conv', 'stale content', 'stale-project');
+        `INSERT INTO file_index (file_path, mtime, size, indexed_at, content_version) VALUES (?, ?, ?, ?, ?)`
+      ).run('/stale/file.jsonl', 123, 456, 789, 1);
 
       // Re-run the migration as a fresh startup would.
       db._migrateFtsContentVersion();
 
-      expect(db.db.pragma('user_version', { simple: true })).toBe(3);
-      // file_index is cleared so every file is reprocessed...
-      expect(db.db.prepare(`SELECT COUNT(*) c FROM file_index`).get().c).toBe(0);
-      // ...but the existing FTS rows are kept so search keeps working while
-      // the background reindex replaces each conversation in place.
-      expect(db.db.prepare(`SELECT COUNT(*) c FROM conversation_fts`).get().c).toBe(1);
+      expect(db.db.pragma('user_version', { simple: true })).toBe(4);
+
+      // The row survives. This is the resume checkpoint: deleting it (the old
+      // behaviour) meant an interrupted rebuild restarted from zero, so a bump
+      // on a large store could never finish.
+      const row = db.db.prepare(
+        `SELECT mtime, size, content_version FROM file_index WHERE file_path = ?`
+      ).get('/stale/file.jsonl');
+      expect(row).toBeTruthy();
+      expect(row.mtime).toBe(123);
+      expect(row.size).toBe(456);
+
+      // ...but it is marked stale, so the next pass re-extracts it.
+      expect(row.content_version).toBe(0);
+      expect(db.needsIndexing('/stale/file.jsonl', 123, 456)).toBe(true);
     });
 
     it('is a no-op when already at the target version', () => {

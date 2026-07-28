@@ -3,6 +3,22 @@ const fs = require('fs-extra');
 const chalk = require('chalk');
 
 /**
+ * Shape of the search index. Bump when the extracted content or the search
+ * table layout changes; `needsIndexing` treats any file recorded at a lower
+ * version as stale, which drives a resumable rebuild.
+ *
+ *   1 = adds [TOOL:<name>] and [TOOL_RESULT] content
+ *   2 = recall parity: [THINKING]/[SYSTEM]/[SUMMARY], 256KB per-block cap
+ *   3 = per-message FTS for role/tool-granular search
+ *   4 = external-content message_fts over a real `messages` table, and a
+ *       contentless conversation_fts keyed by conv_no. Removes the
+ *       non-indexable `DELETE ... WHERE conversation_id = ?` that full-scanned
+ *       the entire index on every indexed file, and stops storing the corpus
+ *       twice.
+ */
+const CONTENT_VERSION = 4;
+
+/**
  * DatabaseManager - SQLite + FTS5 backend for efficient conversation storage and search
  *
  * Replaces the in-memory loading approach with a persistent indexed database.
@@ -92,31 +108,7 @@ class DatabaseManager {
         )
       `);
 
-      // FTS5 virtual table for full-text search on conversation content
-      // Tokenize with unicode61 for proper handling of all characters
-      this.db.exec(`
-        CREATE VIRTUAL TABLE IF NOT EXISTS conversation_fts USING fts5(
-          conversation_id,
-          content,
-          project,
-          tokenize='unicode61 remove_diacritics 2'
-        )
-      `);
-
-      // Per-message FTS for role/tool-granular search (Phase 5). One row per
-      // message; role/tool_name/seq are UNINDEXED (filterable + returnable but
-      // not tokenized). Lives alongside conversation_fts: default search uses
-      // conversation_fts (no blackout), role-filtered search uses this.
-      this.db.exec(`
-        CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(
-          conversation_id UNINDEXED,
-          seq UNINDEXED,
-          role UNINDEXED,
-          tool_name UNINDEXED,
-          content,
-          tokenize='unicode61 remove_diacritics 2'
-        )
-      `);
+      this._createSearchSchema();
 
       // File tracking table - for incremental indexing
       this.db.exec(`
@@ -124,16 +116,9 @@ class DatabaseManager {
           file_path TEXT PRIMARY KEY,
           mtime INTEGER NOT NULL,
           size INTEGER NOT NULL,
-          indexed_at INTEGER NOT NULL
+          indexed_at INTEGER NOT NULL,
+          content_version INTEGER DEFAULT 0
         )
-      `);
-
-      // Create indexes for common queries
-      this.db.exec(`
-        CREATE INDEX IF NOT EXISTS idx_conversations_last_modified ON conversations(last_modified DESC);
-        CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project);
-        CREATE INDEX IF NOT EXISTS idx_conversations_tokens ON conversations(tokens_total DESC);
-        CREATE INDEX IF NOT EXISTS idx_tool_usage_tool ON tool_usage(tool_name);
       `);
     } catch (err) {
       const sqliteVersion = this.db.pragma('sqlite_version', { simple: true });
@@ -143,17 +128,136 @@ class DatabaseManager {
       throw new Error(`Database schema creation failed: ${err.message}. Try deleting ${this.dbPath} and restarting.`);
     }
 
+    try {
+      // Create indexes for common queries
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_conversations_last_modified ON conversations(last_modified DESC);
+        CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project);
+        CREATE INDEX IF NOT EXISTS idx_conversations_tokens ON conversations(tokens_total DESC);
+        CREATE INDEX IF NOT EXISTS idx_tool_usage_tool ON tool_usage(tool_name);
+      `);
+    } catch (err) {
+      throw new Error(`Database index creation failed: ${err.message}`);
+    }
+
     // Migration: Add subagent columns if they don't exist
     this._migrateSubagentColumns();
 
     // Migration: Add cwd column for project name resolution
     this._migrateCwdColumn();
 
-    // FTS content schema: the search corpus now includes tool inputs
-    // and tool results, not just message text. Bumping the user_version
-    // forces a one-time wipe of the FTS index and the file_index
-    // mtime cache, so the next indexer pass re-extracts every session.
+    // Search-schema version. See _migrateFtsContentVersion.
     this._migrateFtsContentVersion();
+  }
+
+  /**
+   * Create the search tables: message storage, its FTS index, and the
+   * conversation-level index. Split out of _createSchema so the version
+   * migration can drop and rebuild exactly this set without touching
+   * conversations/tool_usage/file_index.
+   * @private
+   */
+  _createSearchSchema() {
+      // Per-message content lives in a REAL table, with message_fts as an
+      // external-content FTS5 index over it.
+      //
+      // Why this shape rather than storing the text inside the FTS table:
+      // replacing a conversation's rows requires deleting the old ones first,
+      // and `DELETE FROM <fts> WHERE conversation_id = ?` cannot use an index,
+      // because on an FTS5 virtual table that column is not a key. It degrades
+      // to a full scan of the whole index. Measured on a 3.4 GB store that was
+      // 2.8 s for conversation_fts and 5.7 s for message_fts PER INDEXED FILE,
+      // and the cost grew with total database size rather than file size, so
+      // indexing got slower as the archive grew.
+      //
+      // With a backing table the delete is `DELETE FROM messages WHERE
+      // conversation_id = ?`, which uses idx_messages_conversation, and the
+      // triggers below keep the FTS index in sync. Cost becomes proportional
+      // to the one conversation being replaced instead of the entire corpus.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          conversation_id TEXT NOT NULL,
+          seq INTEGER NOT NULL,
+          role TEXT,
+          tool_name TEXT,
+          content TEXT NOT NULL
+        )
+      `);
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
+      `);
+
+      // content='messages' means the FTS table stores only the inverted index,
+      // not a second copy of the text. content_rowid ties it to messages.id.
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(
+          conversation_id UNINDEXED,
+          seq UNINDEXED,
+          role UNINDEXED,
+          tool_name UNINDEXED,
+          content,
+          content='messages',
+          content_rowid='id',
+          tokenize='unicode61 remove_diacritics 2'
+        )
+      `);
+
+      // Stable small integer per conversation, used as the conversation_fts
+      // rowid. conversations.id is TEXT and the implicit rowid is not usable
+      // here because INSERT OR REPLACE assigns a new one on every re-index,
+      // which would orphan the FTS entry.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS conv_seq (
+          conversation_id TEXT PRIMARY KEY,
+          conv_no INTEGER NOT NULL UNIQUE
+        )
+      `);
+
+      // Conversation-level index, kept alongside message_fts for one capability
+      // message_fts cannot provide: matching terms that appear in DIFFERENT
+      // messages of the same conversation ("foo AND bar", NEAR). A MATCH on
+      // message_fts requires all terms in a single message.
+      //
+      // content='' makes it contentless: it stores the inverted index only,
+      // never a second copy of the transcript text (that duplication was ~1.1 GB
+      // of a 3.6 GB database). Snippets come from message_fts, which has the
+      // text via external content, so losing snippet() here costs nothing.
+      // contentless_delete=1 (SQLite >= 3.43) is what allows DELETE by rowid
+      // without supplying the original text.
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS conversation_fts USING fts5(
+          content,
+          content='',
+          contentless_delete=1,
+          tokenize='unicode61 remove_diacritics 2'
+        )
+      `);
+
+      // External-content tables are not auto-synced; these triggers are the
+      // contract. The delete trigger must pass the OLD column values so FTS5
+      // can locate and remove the right index entries.
+      this.db.exec(`
+        CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+          INSERT INTO message_fts(rowid, conversation_id, seq, role, tool_name, content)
+          VALUES (new.id, new.conversation_id, new.seq, new.role, new.tool_name, new.content);
+        END;
+      `);
+      this.db.exec(`
+        CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+          INSERT INTO message_fts(message_fts, rowid, conversation_id, seq, role, tool_name, content)
+          VALUES ('delete', old.id, old.conversation_id, old.seq, old.role, old.tool_name, old.content);
+        END;
+      `);
+      this.db.exec(`
+        CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+          INSERT INTO message_fts(message_fts, rowid, conversation_id, seq, role, tool_name, content)
+          VALUES ('delete', old.id, old.conversation_id, old.seq, old.role, old.tool_name, old.content);
+          INSERT INTO message_fts(rowid, conversation_id, seq, role, tool_name, content)
+          VALUES (new.id, new.conversation_id, new.seq, new.role, new.tool_name, new.content);
+        END;
+      `);
+
   }
 
   /**
@@ -173,19 +277,45 @@ class DatabaseManager {
    * @private
    */
   _migrateFtsContentVersion() {
-    const TARGET_VERSION = 3;
+    const TARGET_VERSION = CONTENT_VERSION;
     try {
       const current = this.db.pragma('user_version', { simple: true });
       if (current >= TARGET_VERSION) return;
 
       console.log(chalk.cyan(`📦 FTS schema bump: user_version ${current} → ${TARGET_VERSION}; scheduling background reindex.`));
-      // Graceful degradation: do NOT wipe conversation_fts up front. The old
-      // rows stay searchable while the background reindex runs, and each
-      // conversation's FTS is replaced in place as its file is reprocessed
-      // (upsertConversation deletes+reinserts per conversation_id). Clearing
-      // file_index is what forces every file to be treated as changed so the
-      // next indexer pass re-extracts all of them with the new content shape.
-      this.db.prepare(`DELETE FROM file_index`).run();
+
+      // Mark rows stale instead of deleting them.
+      //
+      // This used to be `DELETE FROM file_index`, which threw away the ONLY
+      // resume checkpoint: every file looked changed, so an interrupted pass
+      // restarted from zero. Combined with the old full-scan deletes that meant
+      // a bump could never finish. Keeping the rows and zeroing content_version
+      // preserves mtime/size, so `needsIndexing` can still tell which files
+      // genuinely changed, and progress survives a restart.
+      const cols = this.db.prepare(`PRAGMA table_info(file_index)`).all();
+      if (!cols.some(c => c.name === 'content_version')) {
+        this.db.exec(`ALTER TABLE file_index ADD COLUMN content_version INTEGER DEFAULT 0`);
+      }
+
+      // v4 restructured the search tables (external-content message_fts over a
+      // real `messages` table, contentless conversation_fts keyed by conv_no).
+      // CREATE ... IF NOT EXISTS leaves an older database on the old shape, so
+      // drop that set explicitly and rebuild it. Only the search tables are
+      // touched; conversations, tool_usage, and file_index survive.
+      if (current < 4) {
+        this.db.exec(`
+          DROP TRIGGER IF EXISTS messages_ai;
+          DROP TRIGGER IF EXISTS messages_ad;
+          DROP TRIGGER IF EXISTS messages_au;
+          DROP TABLE IF EXISTS conversation_fts;
+          DROP TABLE IF EXISTS message_fts;
+          DROP TABLE IF EXISTS messages;
+          DROP TABLE IF EXISTS conv_seq;
+        `);
+        this._createSearchSchema();
+      }
+
+      this.db.prepare(`UPDATE file_index SET content_version = 0`).run();
       this.db.pragma(`user_version = ${TARGET_VERSION}`);
     } catch (err) {
       console.warn(chalk.yellow(`⚠️ FTS content version migration failed: ${err.message}`));
@@ -316,11 +446,15 @@ class DatabaseManager {
    */
   needsIndexing(filePath, mtime, size) {
     const stmt = this.db.prepare(`
-      SELECT mtime, size FROM file_index WHERE file_path = ?
+      SELECT mtime, size, content_version FROM file_index WHERE file_path = ?
     `);
     const row = stmt.get(filePath);
 
     if (!row) return true;
+    // A schema bump marks rows stale by zeroing content_version rather than
+    // deleting them, so the mtime/size checkpoint survives and an interrupted
+    // rebuild resumes instead of starting over.
+    if ((row.content_version || 0) < CONTENT_VERSION) return true;
     return row.mtime !== mtime || row.size !== size;
   }
 
@@ -344,27 +478,33 @@ class DatabaseManager {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    const deleteOldFts = this.db.prepare(`
-      DELETE FROM conversation_fts WHERE conversation_id = ?
+    // Indexed delete on a real table (see _createSchema for why this replaced
+    // `DELETE FROM <fts> WHERE conversation_id = ?`, which full-scanned).
+    const deleteOldMessages = this.db.prepare(`
+      DELETE FROM messages WHERE conversation_id = ?
     `);
 
-    const insertFts = this.db.prepare(`
-      INSERT INTO conversation_fts (conversation_id, content, project)
-      VALUES (?, ?, ?)
-    `);
-
-    const deleteOldMsgFts = this.db.prepare(`
-      DELETE FROM message_fts WHERE conversation_id = ?
-    `);
-
-    const insertMsgFts = this.db.prepare(`
-      INSERT INTO message_fts (conversation_id, seq, role, tool_name, content)
+    const insertMessage = this.db.prepare(`
+      INSERT INTO messages (conversation_id, seq, role, tool_name, content)
       VALUES (?, ?, ?, ?, ?)
     `);
 
+    // conv_no is allocated once per conversation and never reused, so the
+    // conversation_fts rowid stays stable across re-indexes.
+    const getConvNo = this.db.prepare(`SELECT conv_no FROM conv_seq WHERE conversation_id = ?`);
+    const allocConvNo = this.db.prepare(`
+      INSERT INTO conv_seq (conversation_id, conv_no)
+      VALUES (?, (SELECT COALESCE(MAX(conv_no), 0) + 1 FROM conv_seq))
+    `);
+    // Addressed by rowid, so the constraint is consumed instead of scanning.
+    const deleteConvFts = this.db.prepare(`DELETE FROM conversation_fts WHERE rowid = ?`);
+    const insertConvFts = this.db.prepare(`
+      INSERT INTO conversation_fts (rowid, content) VALUES (?, ?)
+    `);
+
     const updateFileIndex = this.db.prepare(`
-      INSERT OR REPLACE INTO file_index (file_path, mtime, size, indexed_at)
-      VALUES (?, ?, ?, ?)
+      INSERT OR REPLACE INTO file_index (file_path, mtime, size, indexed_at, content_version)
+      VALUES (?, ?, ?, ?, ${CONTENT_VERSION})
     `);
 
     const deleteOldTools = this.db.prepare(`
@@ -397,18 +537,41 @@ class DatabaseManager {
         conversation.cwd || null
       );
 
-      // Update conversation-level FTS index
-      deleteOldFts.run(conversation.id);
-      if (searchableContent && searchableContent.trim()) {
-        insertFts.run(conversation.id, searchableContent, conversation.project || '');
-      }
+      // Replace this conversation's messages. The delete uses
+      // idx_messages_conversation, and the AFTER DELETE / AFTER INSERT triggers
+      // keep message_fts in sync. Cost is proportional to this conversation,
+      // not to the size of the whole index.
+      deleteOldMessages.run(conversation.id);
 
-      // Update per-message FTS index (role/tool-granular)
-      deleteOldMsgFts.run(conversation.id);
+      let seqFallback = 0;
       for (const m of (messages || [])) {
         if (m && typeof m.text === 'string' && m.text.trim()) {
-          insertMsgFts.run(conversation.id, m.seq ?? 0, m.role || 'unknown', m.tool_name || null, m.text);
+          insertMessage.run(
+            conversation.id,
+            m.seq ?? seqFallback,
+            m.role || 'unknown',
+            m.tool_name || null,
+            m.text
+          );
         }
+        seqFallback++;
+      }
+
+      // Back-compat: callers that only supply whole-conversation text (older
+      // tests, and any path that has not been updated to emit per-message
+      // records) still need per-message search to find them.
+      if ((!messages || messages.length === 0) && searchableContent && searchableContent.trim()) {
+        insertMessage.run(conversation.id, 0, 'conversation', null, searchableContent);
+      }
+
+      // Conversation-level index: carries cross-message AND/NEAR matching.
+      const existing = getConvNo.get(conversation.id);
+      if (!existing) allocConvNo.run(conversation.id);
+      const convNo = (existing || getConvNo.get(conversation.id)).conv_no;
+
+      deleteConvFts.run(convNo);
+      if (searchableContent && searchableContent.trim()) {
+        insertConvFts.run(convNo, searchableContent);
       }
 
       // Update file tracking
@@ -516,8 +679,9 @@ class DatabaseManager {
           c.last_modified, c.created, c.tokens_total, c.tokens_input, c.tokens_output,
           c.primary_model, c.indexed_at, c.is_subagent, c.parent_id,
           bm25(conversation_fts) as relevance
-        FROM conversation_fts fts
-        JOIN conversations c ON fts.conversation_id = c.id
+        FROM conversation_fts
+        JOIN conv_seq cs ON cs.conv_no = conversation_fts.rowid
+        JOIN conversations c ON c.id = cs.conversation_id
         WHERE conversation_fts MATCH ? ${subagentFilter}
         ORDER BY relevance
         LIMIT ? OFFSET ?
@@ -562,16 +726,19 @@ class DatabaseManager {
         ? ''
         : 'AND (c.is_subagent = 0 OR c.is_subagent IS NULL)';
 
-      // FTS5 query with snippet() and highlight() functions
+      // Match on the conversation-level index so terms can come from different
+      // messages ("foo AND bar", NEAR) - message_fts alone would require both
+      // terms in a single message. It is contentless, so it ranks and filters
+      // but cannot return text; the snippet is fetched from message_fts below.
       const stmt = this.db.prepare(`
         SELECT
           c.id, c.file_path, c.filename, c.project, c.message_count, c.file_size,
           c.last_modified, c.created, c.tokens_total, c.tokens_input, c.tokens_output,
           c.primary_model, c.indexed_at, c.is_subagent, c.parent_id,
-          bm25(conversation_fts) as relevance,
-          snippet(conversation_fts, 1, '{{MATCH}}', '{{/MATCH}}', '...', 20) as snippet
-        FROM conversation_fts fts
-        JOIN conversations c ON fts.conversation_id = c.id
+          bm25(conversation_fts) as relevance
+        FROM conversation_fts
+        JOIN conv_seq cs ON cs.conv_no = conversation_fts.rowid
+        JOIN conversations c ON c.id = cs.conversation_id
         WHERE conversation_fts MATCH ? ${subagentFilter}
         ORDER BY relevance
         LIMIT ? OFFSET ?
@@ -581,12 +748,32 @@ class DatabaseManager {
       const safeQuery = this._escapeFtsQuery(query);
       const rows = stmt.all(safeQuery, limit, offset);
 
-      return rows.map(row => ({
-        ...this._rowToConversation(row),
-        relevance: row.relevance,
-        snippet: row.snippet,
-        searchTerm: query
-      }));
+      // Snippets only for the page actually being returned, not the whole
+      // candidate set. Best-effort: a conversation can match across messages
+      // without any single message matching, in which case there is no snippet.
+      const snippetStmt = this.db.prepare(`
+        SELECT snippet(message_fts, 4, '{{MATCH}}', '{{/MATCH}}', '...', 20) AS snippet
+        FROM message_fts
+        WHERE message_fts MATCH ? AND message_fts.conversation_id = ?
+        ORDER BY bm25(message_fts)
+        LIMIT 1
+      `);
+
+      return rows.map(row => {
+        let snippet = null;
+        try {
+          snippet = snippetStmt.get(safeQuery, row.id)?.snippet ?? null;
+        } catch {
+          // A query shape valid at conversation level may not resolve per
+          // message; the result is still valid, just without a preview.
+        }
+        return {
+          ...this._rowToConversation(row),
+          relevance: row.relevance,
+          snippet,
+          searchTerm: query
+        };
+      });
     } catch (err) {
       console.error(chalk.red(`⚠️ FTS5 snippet search failed for query "${query}": ${err.message}`));
       console.error(chalk.gray('   Falling back to basic search without snippets.'));
@@ -788,8 +975,14 @@ class DatabaseManager {
    */
   removeConversation(id) {
     const transaction = this.db.transaction(() => {
-      this.db.prepare('DELETE FROM conversation_fts WHERE conversation_id = ?').run(id);
-      this.db.prepare('DELETE FROM message_fts WHERE conversation_id = ?').run(id);
+      // Addressed deletes only: messages via idx_messages_conversation (its
+      // triggers clear message_fts), conversation_fts by rowid.
+      this.db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(id);
+      const seq = this.db.prepare('SELECT conv_no FROM conv_seq WHERE conversation_id = ?').get(id);
+      if (seq) {
+        this.db.prepare('DELETE FROM conversation_fts WHERE rowid = ?').run(seq.conv_no);
+        this.db.prepare('DELETE FROM conv_seq WHERE conversation_id = ?').run(id);
+      }
       this.db.prepare('DELETE FROM tool_usage WHERE conversation_id = ?').run(id);
       this.db.prepare('DELETE FROM conversations WHERE id = ?').run(id);
     });
@@ -813,9 +1006,15 @@ class DatabaseManager {
           console.log(chalk.gray(`   Cleared ${orphanedCount.changes} orphaned subagent reference(s)`));
         }
 
-        // Inline the deletion to keep it atomic
-        this.db.prepare('DELETE FROM conversation_fts WHERE conversation_id = ?').run(conv.id);
-        this.db.prepare('DELETE FROM message_fts WHERE conversation_id = ?').run(conv.id);
+        // Inline the deletion to keep it atomic. Both index deletes are
+        // addressed (messages by its conversation_id index, conversation_fts by
+        // rowid) rather than by an FTS column, which would full-scan.
+        this.db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(conv.id);
+        const seq = this.db.prepare('SELECT conv_no FROM conv_seq WHERE conversation_id = ?').get(conv.id);
+        if (seq) {
+          this.db.prepare('DELETE FROM conversation_fts WHERE rowid = ?').run(seq.conv_no);
+          this.db.prepare('DELETE FROM conv_seq WHERE conversation_id = ?').run(conv.id);
+        }
         this.db.prepare('DELETE FROM tool_usage WHERE conversation_id = ?').run(conv.id);
         this.db.prepare('DELETE FROM conversations WHERE id = ?').run(conv.id);
       }
@@ -980,9 +1179,12 @@ class DatabaseManager {
       UPDATE conversations SET project = ? WHERE id = ?
     `);
 
-    const updateFtsStmt = this.db.prepare(`
-      UPDATE conversation_fts SET project = ? WHERE conversation_id = ?
-    `);
+    // conversation_fts no longer carries a project column. It used to, and
+    // updating it here was a third full scan per resolved conversation, on
+    // every full index pass - and because an FTS5 UPDATE is a delete plus
+    // reinsert, it re-tokenized the conversation's entire content just to
+    // change a project string. Project is filtered from the conversations
+    // table (SearchService._applyFilters), so the FTS copy bought nothing.
 
     // For each folder, find the root cwd and normalize all project names
     const transaction = this.db.transaction(() => {
@@ -990,9 +1192,13 @@ class DatabaseManager {
         const cwdArray = Array.from(data.cwds);
         if (cwdArray.length === 0) continue;
 
-        // Find the root cwd (shortest path that is a prefix of all others)
-        // Sort by length, shortest first
-        cwdArray.sort((a, b) => a.length - b.length);
+        // Find the root cwd (shortest path that is a prefix of all others).
+        // Shortest first, then lexicographic as a tie-break: without the second
+        // key, two equal-length cwds (/work/a vs /work/s) resolved in whatever
+        // order the indexer happened to visit the files, so the whole folder's
+        // project name changed when file ordering changed. The name a project
+        // gets must not depend on traversal order.
+        cwdArray.sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0));
         let rootCwd = cwdArray[0];
 
         // Verify it's actually a prefix of all others
@@ -1012,7 +1218,6 @@ class DatabaseManager {
         for (const conv of data.conversations) {
           if (conv.project !== canonicalName) {
             updateStmt.run(canonicalName, conv.id);
-            updateFtsStmt.run(canonicalName, conv.id);
             resolvedCount++;
             folderUpdated = true;
           }

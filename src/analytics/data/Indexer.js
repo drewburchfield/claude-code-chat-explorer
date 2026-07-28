@@ -43,9 +43,21 @@ class Indexer {
 
     try {
       // Get all JSONL files
-      const files = await this._findJsonlFiles(this.projectsDir);
+      let files = await this._findJsonlFiles(this.projectsDir);
       stats.filesScanned = files.length;
       console.log(chalk.gray(`Found ${files.length} JSONL files to process`));
+
+      // Newest first. On a large backlog the tool becomes useful in seconds
+      // instead of after the whole corpus, because the conversations a user
+      // actually wants are the ones they touched most recently. Unchanged
+      // files are skipped cheaply either way, so this only reorders real work.
+      // stat failures sort last rather than aborting the pass.
+      const mtimes = new Map();
+      await Promise.all(files.map(async (f) => {
+        try { mtimes.set(f, (await fs.stat(f)).mtime.getTime()); }
+        catch { mtimes.set(f, 0); }
+      }));
+      files = files.sort((a, b) => (mtimes.get(b) || 0) - (mtimes.get(a) || 0));
 
       // Get currently indexed files to detect deletions. Union file_index with
       // the conversations table so orphans are still detected when file_index
