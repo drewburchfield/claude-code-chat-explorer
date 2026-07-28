@@ -1,6 +1,8 @@
 const path = require('path');
 const fs = require('fs-extra');
 const chalk = require('chalk');
+const { toolKind } = require('../core/ToolTaxonomy');
+const { classifyAgentWorktree } = require('../core/WorktreeClassifier');
 
 /**
  * Shape of the search index. Bump when the extracted content or the search
@@ -15,8 +17,21 @@ const chalk = require('chalk');
  *       non-indexable `DELETE ... WHERE conversation_id = ?` that full-scanned
  *       the entire index on every indexed file, and stops storing the corpus
  *       twice.
+ *   5 = parse-time enrichment: tool_usage gains tool_kind/mcp_server/
+ *       error_count, file_changes rows are extracted from edit tools, and
+ *       messages carry src_line transcript provenance. Data is produced at
+ *       parse time, so every file must re-index to populate it.
  */
-const CONTENT_VERSION = 4;
+const CONTENT_VERSION = 5;
+
+/**
+ * The canonical-session predicate: aggregates that describe "my conversations"
+ * (counts, per-tool stats, file-change stats) reuse this one fragment so
+ * subagent transcripts and empty sessions cannot silently inflate totals.
+ * List/search paths keep their explicit includeSubagents handling; this is
+ * for rollups only.
+ */
+const CANONICAL_CONVERSATIONS = `is_subagent = 0 AND message_count > 0`;
 
 /**
  * How many files may sit below CONTENT_VERSION before search reports itself
@@ -100,19 +115,43 @@ class DatabaseManager {
           tokens_input INTEGER DEFAULT 0,
           tokens_output INTEGER DEFAULT 0,
           primary_model TEXT,
-          indexed_at INTEGER NOT NULL
+          indexed_at INTEGER NOT NULL,
+          is_worktree_agent INTEGER DEFAULT 0,
+          entrypoint TEXT
         )
       `);
 
-      // Tool usage tracking
+      // Tool usage tracking. tool_kind/mcp_server come from ToolTaxonomy;
+      // error_count is the number of calls whose tool_result carried
+      // is_error, correlated by tool_use_id at parse time.
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS tool_usage (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           conversation_id TEXT NOT NULL,
           tool_name TEXT NOT NULL,
           call_count INTEGER DEFAULT 1,
+          tool_kind TEXT,
+          mcp_server TEXT,
+          error_count INTEGER DEFAULT 0,
           FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
           UNIQUE(conversation_id, tool_name)
+        )
+      `);
+
+      // File changes extracted from Write/Edit/MultiEdit/NotebookEdit
+      // tool_use inputs. src_line is the 1-based transcript line of the
+      // tool_use block, so a change links back to its exact JSONL line.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS file_changes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          conversation_id TEXT NOT NULL,
+          seq INTEGER,
+          src_line INTEGER,
+          path TEXT NOT NULL,
+          change_kind TEXT NOT NULL,
+          added_lines INTEGER DEFAULT 0,
+          removed_lines INTEGER DEFAULT 0,
+          FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
         )
       `);
 
@@ -143,6 +182,8 @@ class DatabaseManager {
         CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project);
         CREATE INDEX IF NOT EXISTS idx_conversations_tokens ON conversations(tokens_total DESC);
         CREATE INDEX IF NOT EXISTS idx_tool_usage_tool ON tool_usage(tool_name);
+        CREATE INDEX IF NOT EXISTS idx_file_changes_path ON file_changes(path);
+        CREATE INDEX IF NOT EXISTS idx_file_changes_conversation ON file_changes(conversation_id);
       `);
     } catch (err) {
       throw new Error(`Database index creation failed: ${err.message}`);
@@ -153,6 +194,9 @@ class DatabaseManager {
 
     // Migration: Add cwd column for project name resolution
     this._migrateCwdColumn();
+
+    // Migration: v5 enrichment columns on tables that predate them
+    this._migrateEnrichmentColumns();
 
     // Search-schema version. See _migrateFtsContentVersion.
     this._migrateFtsContentVersion();
@@ -187,6 +231,7 @@ class DatabaseManager {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           conversation_id TEXT NOT NULL,
           seq INTEGER NOT NULL,
+          src_line INTEGER,
           role TEXT,
           tool_name TEXT,
           content TEXT NOT NULL
@@ -348,6 +393,40 @@ class DatabaseManager {
       console.error(chalk.red(`❌ Search schema migration failed: ${err.message}`));
       console.error(chalk.gray(`   Database: ${this.dbPath}`));
       console.error(chalk.gray(`   The search index was NOT migrated. Delete the database to rebuild from transcripts.`));
+      throw err;
+    }
+  }
+
+  /**
+   * Add the v5 enrichment columns to databases created before them.
+   * CREATE TABLE IF NOT EXISTS leaves an existing table on its old shape, so
+   * these ALTERs are the upgrade path; new databases already have the columns.
+   * Values populate as files re-index under CONTENT_VERSION 5. Failure here
+   * is fatal for the same reason as the search-schema migration: continuing
+   * would mean upsert statements referencing columns that do not exist.
+   * @private
+   */
+  _migrateEnrichmentColumns() {
+    const addMissing = (table, column, ddl) => {
+      const cols = this.db.prepare(`PRAGMA table_info(${table})`).all();
+      if (!cols.some(c => c.name === column)) {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+      }
+    };
+    try {
+      addMissing('tool_usage', 'tool_kind', 'TEXT');
+      addMissing('tool_usage', 'mcp_server', 'TEXT');
+      addMissing('tool_usage', 'error_count', 'INTEGER DEFAULT 0');
+      addMissing('conversations', 'is_worktree_agent', 'INTEGER DEFAULT 0');
+      addMissing('conversations', 'entrypoint', 'TEXT');
+      // messages may not exist yet on a pre-v4 database; _migrateFtsContentVersion
+      // rebuilds it (with src_line) in that case.
+      const hasMessages = this.db.prepare(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages'`
+      ).get();
+      if (hasMessages) addMissing('messages', 'src_line', 'INTEGER');
+    } catch (err) {
+      console.error(chalk.red(`❌ Enrichment column migration failed: ${err.message}`));
       throw err;
     }
   }
@@ -584,8 +663,8 @@ class DatabaseManager {
       INSERT OR REPLACE INTO conversations (
         id, file_path, filename, project, message_count, file_size,
         last_modified, created, tokens_total, tokens_input, tokens_output,
-        primary_model, indexed_at, is_subagent, parent_id, cwd
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        primary_model, indexed_at, is_subagent, parent_id, cwd, is_worktree_agent, entrypoint
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     // Indexed delete on a real table (see _createSchema for why this replaced
@@ -595,8 +674,8 @@ class DatabaseManager {
     `);
 
     const insertMessage = this.db.prepare(`
-      INSERT INTO messages (conversation_id, seq, role, tool_name, content)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO messages (conversation_id, seq, src_line, role, tool_name, content)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
 
     // conv_no is allocated once per conversation and never reused, so the
@@ -632,8 +711,19 @@ class DatabaseManager {
     `);
 
     const insertTool = this.db.prepare(`
-      INSERT OR REPLACE INTO tool_usage (conversation_id, tool_name, call_count)
-      VALUES (?, ?, ?)
+      INSERT OR REPLACE INTO tool_usage
+        (conversation_id, tool_name, call_count, tool_kind, mcp_server, error_count)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+
+    const deleteOldFileChanges = this.db.prepare(`
+      DELETE FROM file_changes WHERE conversation_id = ?
+    `);
+
+    const insertFileChange = this.db.prepare(`
+      INSERT INTO file_changes
+        (conversation_id, seq, src_line, path, change_kind, added_lines, removed_lines)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
 
     const transaction = this.db.transaction(() => {
@@ -654,7 +744,9 @@ class DatabaseManager {
         now,
         conversation.isSubagent ? 1 : 0,
         conversation.parentId || null,
-        conversation.cwd || null
+        conversation.cwd || null,
+        conversation.isWorktreeAgent ? 1 : 0,
+        conversation.entrypoint || null
       );
 
       // Replace this conversation's messages. The delete uses
@@ -669,6 +761,7 @@ class DatabaseManager {
           insertMessage.run(
             conversation.id,
             m.seq ?? seqFallback,
+            m.src_line ?? null,
             m.role || 'unknown',
             m.tool_name || null,
             m.text
@@ -681,7 +774,7 @@ class DatabaseManager {
       // tests, and any path that has not been updated to emit per-message
       // records) still need per-message search to find them.
       if ((!messages || messages.length === 0) && searchableContent && searchableContent.trim()) {
-        insertMessage.run(conversation.id, 0, 'conversation', null, searchableContent);
+        insertMessage.run(conversation.id, 0, null, 'conversation', null, searchableContent);
       }
 
       // Conversation-level index: carries cross-message AND/NEAR matching.
@@ -702,12 +795,32 @@ class DatabaseManager {
         now
       );
 
-      // Update tool usage
+      // Update tool usage. Kind/server derive from the name via ToolTaxonomy;
+      // error counts come from the parse-time tool_use_id correlation and
+      // default to 0 for callers that do not supply them.
       deleteOldTools.run(conversation.id);
       if (conversation.toolUsage && conversation.toolUsage.tools) {
+        const errors = conversation.toolUsage.errors || {};
         for (const [toolName, count] of Object.entries(conversation.toolUsage.tools)) {
-          insertTool.run(conversation.id, toolName, count);
+          const { kind, mcp } = toolKind(toolName);
+          insertTool.run(conversation.id, toolName, count, kind, mcp, errors[toolName] || 0);
         }
+      }
+
+      // Replace this conversation's file changes (same replace-in-place shape
+      // as messages/tool_usage: indexed delete, then insert).
+      deleteOldFileChanges.run(conversation.id);
+      for (const fc of (conversation.fileChanges || [])) {
+        if (!fc || !fc.path || !fc.change_kind) continue;
+        insertFileChange.run(
+          conversation.id,
+          fc.seq ?? null,
+          fc.src_line ?? null,
+          fc.path,
+          fc.change_kind,
+          fc.added_lines || 0,
+          fc.removed_lines || 0
+        );
       }
     });
 
@@ -743,7 +856,7 @@ class DatabaseManager {
       SELECT
         id, file_path, filename, project, message_count, file_size,
         last_modified, created, tokens_total, tokens_input, tokens_output,
-        primary_model, indexed_at, is_subagent, parent_id
+        primary_model, indexed_at, is_subagent, parent_id, is_worktree_agent, entrypoint
       FROM conversations
     `;
 
@@ -797,7 +910,7 @@ class DatabaseManager {
         SELECT
           c.id, c.file_path, c.filename, c.project, c.message_count, c.file_size,
           c.last_modified, c.created, c.tokens_total, c.tokens_input, c.tokens_output,
-          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id,
+          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id, c.is_worktree_agent, c.entrypoint,
           bm25(conversation_fts) as relevance
         FROM conversation_fts
         JOIN conv_seq cs ON cs.conv_no = conversation_fts.rowid
@@ -854,7 +967,7 @@ class DatabaseManager {
         SELECT
           c.id, c.file_path, c.filename, c.project, c.message_count, c.file_size,
           c.last_modified, c.created, c.tokens_total, c.tokens_input, c.tokens_output,
-          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id,
+          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id, c.is_worktree_agent, c.entrypoint,
           bm25(conversation_fts) as relevance
         FROM conversation_fts
         JOIN conv_seq cs ON cs.conv_no = conversation_fts.rowid
@@ -992,7 +1105,7 @@ class DatabaseManager {
         SELECT
           c.id, c.file_path, c.filename, c.project, c.message_count, c.file_size,
           c.last_modified, c.created, c.tokens_total, c.tokens_input, c.tokens_output,
-          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id,
+          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id, c.is_worktree_agent, c.entrypoint,
           bm25(message_fts) AS relevance,
           snippet(message_fts, 4, '{{MATCH}}', '{{/MATCH}}', '...', 20) AS snippet,
           message_fts.role AS matched_role, message_fts.seq AS matched_seq
@@ -1106,17 +1219,102 @@ class DatabaseManager {
   }
 
   /**
-   * Get aggregated tool usage statistics
-   * @returns {Object} Tool usage summary
+   * Get aggregated tool usage statistics, canonical conversations only
+   * (no subagent transcripts, no empty sessions).
+   * @returns {Array<{tool_name, tool_kind, mcp_server, total_calls, total_errors, conversations}>}
    */
   getToolUsageStats() {
     const stmt = this.db.prepare(`
-      SELECT tool_name, SUM(call_count) as total_calls, COUNT(DISTINCT conversation_id) as conversations
-      FROM tool_usage
-      GROUP BY tool_name
+      SELECT t.tool_name, t.tool_kind, t.mcp_server,
+             SUM(t.call_count) as total_calls,
+             SUM(t.error_count) as total_errors,
+             COUNT(DISTINCT t.conversation_id) as conversations
+      FROM tool_usage t
+      JOIN conversations c ON c.id = t.conversation_id
+      WHERE ${CANONICAL_CONVERSATIONS}
+      GROUP BY t.tool_name
       ORDER BY total_calls DESC
     `);
     return stmt.all();
+  }
+
+  /**
+   * Tool usage for ONE conversation, shaped for the analytics modal.
+   * @param {string} conversationId
+   * @returns {{totalCalls: number, totalErrors: number, uniqueTools: number,
+   *            breakdown: Object, tools: Array}}
+   */
+  getConversationToolUsage(conversationId) {
+    const rows = this.db.prepare(`
+      SELECT tool_name, call_count, tool_kind, mcp_server, error_count
+      FROM tool_usage WHERE conversation_id = ?
+      ORDER BY call_count DESC
+    `).all(conversationId);
+    const breakdown = {};
+    let totalCalls = 0, totalErrors = 0;
+    for (const r of rows) {
+      breakdown[r.tool_name] = r.call_count;
+      totalCalls += r.call_count;
+      totalErrors += r.error_count || 0;
+    }
+    return { totalCalls, totalErrors, uniqueTools: rows.length, breakdown, tools: rows };
+  }
+
+  /**
+   * Aggregate tool usage by kind (shell / file_edit / file_read / search /
+   * task / web / mcp / other), canonical conversations only. MCP rows also
+   * roll up per server.
+   * @returns {{kinds: Array, mcpServers: Array}}
+   */
+  getToolKindStats() {
+    const kinds = this.db.prepare(`
+      SELECT COALESCE(t.tool_kind, 'other') as tool_kind,
+             SUM(t.call_count) as total_calls,
+             SUM(t.error_count) as total_errors,
+             COUNT(DISTINCT t.conversation_id) as conversations
+      FROM tool_usage t
+      JOIN conversations c ON c.id = t.conversation_id
+      WHERE ${CANONICAL_CONVERSATIONS}
+      GROUP BY COALESCE(t.tool_kind, 'other')
+      ORDER BY total_calls DESC
+    `).all();
+    const mcpServers = this.db.prepare(`
+      SELECT t.mcp_server,
+             SUM(t.call_count) as total_calls,
+             SUM(t.error_count) as total_errors,
+             COUNT(DISTINCT t.conversation_id) as conversations
+      FROM tool_usage t
+      JOIN conversations c ON c.id = t.conversation_id
+      WHERE ${CANONICAL_CONVERSATIONS} AND t.mcp_server IS NOT NULL
+      GROUP BY t.mcp_server
+      ORDER BY total_calls DESC
+    `).all();
+    return { kinds, mcpServers };
+  }
+
+  /**
+   * Conversations that changed a given file, newest first. Substring match on
+   * the stored path (bound as a parameter; % wildcards in the input are
+   * escaped so a query cannot widen itself).
+   * @param {string} pathQuery - Substring of the file path
+   * @param {number} [limit=50]
+   * @returns {Array}
+   */
+  getConversationsTouchingFile(pathQuery, limit = 50) {
+    if (typeof pathQuery !== 'string' || !pathQuery.trim()) return [];
+    const escaped = pathQuery.trim().replace(/[%_\\]/g, ch => `\\${ch}`);
+    return this.db.prepare(`
+      SELECT c.id, c.project, c.last_modified,
+             fc.path, SUM(fc.added_lines) as added_lines,
+             SUM(fc.removed_lines) as removed_lines,
+             COUNT(*) as change_count
+      FROM file_changes fc
+      JOIN conversations c ON c.id = fc.conversation_id
+      WHERE fc.path LIKE ? ESCAPE '\\' AND ${CANONICAL_CONVERSATIONS}
+      GROUP BY c.id, fc.path
+      ORDER BY c.last_modified DESC
+      LIMIT ?
+    `).all(`%${escaped}%`, Math.max(1, Math.min(500, limit)));
   }
 
   /**
@@ -1251,6 +1449,12 @@ class DatabaseManager {
       },
       indexedAt: new Date(row.indexed_at),
       isSubagent: row.is_subagent === 1,
+      isWorktreeAgent: row.is_worktree_agent === 1,
+      // "sdk-*" entrypoints (sdk-cli = `claude -p`/SDK CLI, sdk-py = Python
+      // SDK) are headless invocations; "cli" and "claude-desktop" are
+      // interactive. The raw value is kept so new entrypoints stay visible.
+      entrypoint: row.entrypoint || null,
+      isHeadless: typeof row.entrypoint === 'string' && row.entrypoint.startsWith('sdk'),
       parentId: row.parent_id || null
     };
   }
@@ -1392,7 +1596,11 @@ class DatabaseManager {
           }
         }
 
-        const canonicalName = path.basename(rootCwd);
+        // Agent-worktree folders must resolve to the OWNING project, not the
+        // worktree directory's own basename, or the fake project name this
+        // classification removes would be reinstated here.
+        const worktree = classifyAgentWorktree(rootCwd);
+        const canonicalName = worktree?.owningProject || path.basename(rootCwd);
         if (!canonicalName) continue;
 
         // Update all conversations in this folder to use the canonical name
@@ -1415,3 +1623,4 @@ class DatabaseManager {
 }
 
 module.exports = DatabaseManager;
+module.exports.CANONICAL_CONVERSATIONS = CANONICAL_CONVERSATIONS;

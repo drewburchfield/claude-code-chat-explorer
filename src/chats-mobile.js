@@ -325,6 +325,9 @@ class ChatsMobile {
             lastModified: c.lastModified,
             messageCount: c.messageCount,
             isSubagent: c.isSubagent,
+            isWorktreeAgent: c.isWorktreeAgent,
+            isHeadless: c.isHeadless,
+            entrypoint: c.entrypoint,
             parentId: c.parentId,
             isStub: c.isStub,
             subagentCount: c.subagentCount,
@@ -621,6 +624,42 @@ class ChatsMobile {
         res.json({ projects: [], models: [], tools: [], roles: ['user', 'assistant', 'system', 'tool'], dateRange: { min: null, max: null } });
       } catch (error) {
         console.error('Error serving facets:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+
+    // Tool-usage rollups: per tool, per kind, per MCP server. Canonical
+    // conversations only (no subagent transcripts, no empty sessions).
+    this.app.get('/api/analytics/tools', (req, res) => {
+      try {
+        if (!(this.useDatabaseBackend && this.databaseBackend.isInitialized)) {
+          return res.status(503).json({ error: 'Database backend not available' });
+        }
+        res.json(this.databaseBackend.toolStats());
+      } catch (error) {
+        console.error('Error serving tool stats:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+
+    // Which conversations changed a file. ?path= is a substring of the
+    // absolute path as it appeared in the tool input.
+    this.app.get('/api/analytics/file-changes', (req, res) => {
+      try {
+        if (!(this.useDatabaseBackend && this.databaseBackend.isInitialized)) {
+          return res.status(503).json({ error: 'Database backend not available' });
+        }
+        const pathQuery = typeof req.query.path === 'string' ? req.query.path : '';
+        if (!pathQuery.trim()) {
+          return res.status(400).json({ error: 'path query parameter is required' });
+        }
+        const limit = req.query.limit ? parseInt(req.query.limit, 10) : 50;
+        if (!Number.isInteger(limit) || limit <= 0) {
+          return res.status(400).json({ error: 'limit must be a positive integer' });
+        }
+        res.json({ changes: this.databaseBackend.fileChanges(pathQuery, limit) });
+      } catch (error) {
+        console.error('Error serving file changes:', error);
         res.status(500).json({ error: 'Internal server error' });
       }
     });
@@ -987,13 +1026,29 @@ class ChatsMobile {
           return `${seconds}s`;
         };
 
+        // Tool usage: the database is the source of truth. The list rows the
+        // database backend serves carry a zeroed toolUsage placeholder (the
+        // analyzer shape is only populated in file-backed mode), which made
+        // the modal report 0 tools for every conversation.
+        let dbToolUsage = null;
+        if (this.useDatabaseBackend && this.databaseBackend.isInitialized) {
+          try {
+            dbToolUsage = this.databaseBackend.conversationToolUsage(conversationId);
+          } catch (err) {
+            console.warn(`⚠️ Tool usage lookup failed for ${conversationId}: ${err.message}`);
+          }
+        }
+        const effectiveToolCalls = dbToolUsage
+          ? dbToolUsage.totalCalls
+          : (conversation.toolUsage?.totalToolCalls || 0);
+
         // Generate optimization tips based on analytics
         const optimizationTips = [];
 
         if (cacheEfficiency < 20 && cacheTotal > 0) {
           optimizationTips.push('• Low cache efficiency detected. Consider restructuring prompts to maximize cache reuse.');
         }
-        if (conversation.toolUsage?.totalToolCalls > 50) {
+        if (effectiveToolCalls > 50) {
           optimizationTips.push('• High tool usage detected. Review if all tool calls are necessary.');
         }
         if (conversation.tokenUsage?.outputTokens > conversation.tokenUsage?.inputTokens * 2) {
@@ -1017,7 +1072,7 @@ class ChatsMobile {
           // Overview
           messageCount: messages.length,
           totalTokens: conversation.tokenUsage?.total || 0,
-          toolCalls: conversation.toolUsage?.totalToolCalls || 0,
+          toolCalls: effectiveToolCalls,
           cacheEfficiency: `${cacheEfficiency}%`,
 
           // Token breakdown. Source these from the freshly-attributed
@@ -1078,11 +1133,13 @@ class ChatsMobile {
             })()
           },
 
-          // Tool usage
+          // Tool usage (DB-backed when available; see dbToolUsage above)
           toolUsage: {
-            totalCalls: conversation.toolUsage?.totalToolCalls || 0,
-            uniqueTools: conversation.toolUsage?.uniqueTools || 0,
-            breakdown: conversation.toolUsage?.toolStats || {},
+            totalCalls: effectiveToolCalls,
+            totalErrors: dbToolUsage ? dbToolUsage.totalErrors : 0,
+            uniqueTools: dbToolUsage ? dbToolUsage.uniqueTools : (conversation.toolUsage?.uniqueTools || 0),
+            breakdown: dbToolUsage ? dbToolUsage.breakdown : (conversation.toolUsage?.toolStats || {}),
+            tools: dbToolUsage ? dbToolUsage.tools : [],
             timeline: conversation.toolUsage?.toolTimeline || []
           },
 

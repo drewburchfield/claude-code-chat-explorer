@@ -482,6 +482,30 @@
             margin-right: 6px;
         }
 
+        /* Session-source badges (headless / desktop / worktree agent).
+           Interactive CLI sessions carry no badge. */
+        .source-badge {
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.4px;
+            text-transform: uppercase;
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin-right: 6px;
+        }
+        .source-badge.source-headless {
+            color: #b48ede;
+            background: rgba(140, 82, 200, 0.15);
+        }
+        .source-badge.source-desktop {
+            color: #6db3d6;
+            background: rgba(70, 140, 180, 0.15);
+        }
+        .source-badge.source-worktree {
+            color: #d6a86d;
+            background: rgba(180, 130, 60, 0.15);
+        }
+
         /* Subagent count badge */
         .subagent-count {
             font-size: 11px;
@@ -1191,6 +1215,63 @@
         /* Indent conversations within project groups */
         .project-group .conversation-item {
             padding-left: 36px;
+        }
+
+        /* "Automated runs" cluster: headless SDK sessions outnumber
+           interactive ones inside a project folder, so they collapse behind a
+           sub-header. Deliberately quieter than .project-header - no avatar, no
+           sticky positioning, muted text - so it reads as a divider inside the
+           group rather than a second group. */
+        .cluster-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 20px 8px 36px;
+            background: var(--bg-primary);
+            border-bottom: 1px solid var(--border-primary);
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+        }
+
+        .cluster-header:hover {
+            background: var(--bg-secondary);
+        }
+
+        .cluster-label {
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+
+        .cluster-count {
+            color: var(--text-secondary);
+            background: var(--bg-tertiary);
+            font-size: 0.75rem;
+            font-weight: 500;
+            padding: 1px 8px;
+            border-radius: 10px;
+        }
+
+        .cluster-toggle {
+            margin-left: auto;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+        }
+
+        .cluster-toggle-icon {
+            transition: transform 0.2s ease;
+        }
+
+        .cluster-toggle-icon.expanded {
+            transform: rotate(180deg);
+        }
+
+        /* Cluster members sit one level deeper than their sub-header. */
+        .project-group .conversation-item.automated-item {
+            padding-left: 52px;
         }
 
         .conversation-state {
@@ -2782,6 +2863,23 @@
     <script src="components/WatcherHealth.js"></script>
 
     <script>
+        /**
+         * The one HTML-escaping implementation for ELEMENT CONTENT. The
+         * ChatsMobileApp method delegates here, and standalone functions
+         * (the analytics modal renders outside the class, where `this` is
+         * not the app) call it directly. Neutralizes & < > via text-node
+         * serialization; NOT sufficient for attribute values (no quote
+         * escaping), use the class's escapeAttr for those.
+         * @param {*} text - Value to escape
+         * @returns {string} Escaped text, always a string
+         */
+        function escapeHtmlText(text) {
+            if (text === null || text === undefined) return '';
+            const div = document.createElement('div');
+            div.textContent = typeof text === 'string' ? text : String(text);
+            return div.innerHTML;
+        }
+
         class ChatsMobileApp {
             constructor() {
                 this.conversations = [];
@@ -3159,6 +3257,12 @@
                 if (!this.expandedProjects) {
                     this.expandedProjects = new Set(); // All collapsed by default
                 }
+                // Automated-run clusters, keyed by project name. Separate from
+                // expandedProjects so a project can be open with its cluster
+                // still folded. Collapsed on every page load by design.
+                if (!this.expandedClusters) {
+                    this.expandedClusters = new Set();
+                }
 
                 // Render grouped conversations
                 const today = new Date();
@@ -3167,9 +3271,33 @@
                 conversationsList.innerHTML = sortedProjects.map(projectName => {
                     const projectConversations = groupedByProject[projectName].conversations;
                     const isExpanded = this.expandedProjects.has(projectName);
+                    const clusterExpanded = this.expandedClusters.has(projectName);
                     const firstLetter = projectName.charAt(0).toUpperCase();
+
+                    // Split the project's rows into the interactive stream and
+                    // the automated (headless SDK) cluster. Subagent rows are
+                    // NOT a third stream: the server emits each parent
+                    // immediately followed by its children, and splitting them
+                    // out would orphan them from their parent. Each child
+                    // instead follows its parent into whichever stream the
+                    // parent landed in, so subagent rendering and ordering are
+                    // exactly what they were before.
+                    const interactive = [];
+                    const automated = [];
+                    const streamByParentId = new Map();
+                    for (const conv of projectConversations) {
+                        if (conv.isSubagent) {
+                            (streamByParentId.get(conv.parentId) || interactive).push(conv);
+                        } else {
+                            const stream = conv.isHeadless ? automated : interactive;
+                            stream.push(conv);
+                            streamByParentId.set(conv.id, stream);
+                        }
+                    }
+
                     // Count sessions excluding subagents (always, regardless of checkbox)
-                    const sessionCount = projectConversations.filter(c => !c.isSubagent).length;
+                    const sessionCount = interactive.filter(c => !c.isSubagent).length;
+                    const automatedCount = automated.filter(c => !c.isSubagent).length;
                     // Format temporal info
                     const latestActivity = groupedByProject[projectName].latestActivity;
                     const fullDate = this.formatFullDate(latestActivity);
@@ -3180,8 +3308,18 @@
                     const isToday = activityDate.getTime() === today.getTime();
                     const todayClass = isToday ? ' today-activity' : '';
 
-                    // Render conversations for this project
-                    const conversationsHTML = projectConversations.map(conv => {
+                    // Element-content vs attribute need different escaping: the
+                    // name is rendered as text AND used in data-project="...".
+                    // Declared before the row/cluster markup below, which reads
+                    // projectNameAttr.
+                    const escapedProjectName = this.escapeHtml(projectName);
+                    const projectNameAttr = this.escapeAttr(projectName);
+
+                    // Render one conversation row. `visible` decides only the
+                    // inline display; the markup (classes, badges, data
+                    // attributes) is identical for interactive and automated
+                    // rows so click delegation and styling stay uniform.
+                    const renderRow = (conv, visible, inCluster) => {
                         const state = states[conv.id] || 'inactive';
                         const stateClass = this.getStateClass(state);
                         const stateLabel = this.getStateLabel(state);
@@ -3199,16 +3337,23 @@
                         const subagentCount = (conv.subagentCount && conv.subagentCount > 0)
                             ? `<span class="subagent-count">${conv.subagentCount} subagent${conv.subagentCount > 1 ? 's' : ''}</span>`
                             : '';
+                        // Session-source badge. Labels come from a FIXED map
+                        // keyed on server-derived flags; the raw entrypoint
+                        // string is transcript-controlled and is never
+                        // interpolated into markup. Interactive CLI is the
+                        // norm and gets no badge.
+                        const sourceBadge = this.getSourceBadge(conv);
+                        const clusterClass = inCluster ? ' automated-item' : '';
 
                         return `
-                            <div class="conversation-item${subagentClass}${stubClass}" data-conversation-id="${this.escapeAttr(conv.id)}" style="display: ${isExpanded ? 'flex' : 'none'}">
+                            <div class="conversation-item${subagentClass}${stubClass}${clusterClass}" data-conversation-id="${this.escapeAttr(conv.id)}" style="display: ${visible ? 'flex' : 'none'}">
                                 <div class="conversation-avatar conversation-avatar-small">
                                     ${conversationId.substring(0, 2).toUpperCase()}
                                 </div>
                                 <div class="conversation-content">
                                     <div class="conversation-header">
                                         <div class="conversation-name">Session ${conversationId}</div>
-                                        ${subagentBadge}${subagentCount}
+                                        ${sourceBadge}${subagentBadge}${subagentCount}
                                         <div class="conversation-time">${lastActivity}</div>
                                     </div>
                                     <div class="conversation-meta">
@@ -3218,12 +3363,31 @@
                                 </div>
                             </div>
                         `;
-                    }).join('');
+                    };
 
-                    // Element-content vs attribute need different escaping: the
-                    // name is rendered as text AND used in data-project="...".
-                    const escapedProjectName = this.escapeHtml(projectName);
-                    const projectNameAttr = this.escapeAttr(projectName);
+                    const interactiveHTML = interactive
+                        .map(conv => renderRow(conv, isExpanded, false)).join('');
+
+                    // The cluster sub-header follows the project group's own
+                    // expansion; its members additionally need the cluster
+                    // open. Label and count are static text and a number, so
+                    // nothing transcript-controlled is interpolated here.
+                    const clusterHTML = automated.length > 0
+                        ? `
+                            <div class="cluster-header" data-project="${projectNameAttr}" style="display: ${isExpanded ? 'flex' : 'none'}">
+                                <span class="cluster-label">Automated runs</span>
+                                <span class="cluster-count">${automatedCount}</span>
+                                <span class="cluster-toggle">
+                                    <svg class="cluster-toggle-icon ${clusterExpanded ? 'expanded' : ''}" width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                        <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/>
+                                    </svg>
+                                </span>
+                            </div>
+                          ` + automated.map(conv => renderRow(conv, isExpanded && clusterExpanded, true)).join('')
+                        : '';
+
+                    const conversationsHTML = interactiveHTML + clusterHTML;
+
                     return `
                         <div class="project-group${todayClass}" data-project="${projectNameAttr}">
                             <div class="project-header${todayClass}" data-project="${projectNameAttr}">
@@ -3234,7 +3398,7 @@
                                     <div class="project-name">${escapedProjectName}</div>
                                     <div class="project-meta">
                                         <span class="project-date">${fullDate} · ${relativeTime}</span>
-                                        <span class="project-sessions">${sessionCount} session${sessionCount !== 1 ? 's' : ''}</span>
+                                        <span class="project-sessions">${sessionCount} session${sessionCount !== 1 ? 's' : ''}${automatedCount > 0 ? ` · ${automatedCount} automated` : ''}</span>
                                     </div>
                                 </div>
                                 <div class="project-toggle">
@@ -3256,6 +3420,17 @@
                     });
                 });
 
+                // Bind automated-cluster toggles. The sub-header is a SIBLING of
+                // .project-header, so the project handler above cannot fire for
+                // it; stopPropagation is belt-and-braces against the group ever
+                // becoming clickable itself.
+                conversationsList.querySelectorAll('.cluster-header').forEach(header => {
+                    header.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        this.toggleAutomatedCluster(header.dataset.project);
+                    });
+                });
+
                 // Bind conversation click events
                 conversationsList.querySelectorAll('.conversation-item').forEach(item => {
                     item.addEventListener('click', () => {
@@ -3273,6 +3448,21 @@
                 }
 
                 // Re-render conversations with current states
+                this.renderConversations(this.conversations, this.conversationStates);
+            }
+
+            /**
+             * Fold/unfold a project's "Automated runs" cluster. Independent of
+             * expandedProjects: a project stays open while its cluster folds.
+             * @param {string} projectName - Group key, from data-project
+             */
+            toggleAutomatedCluster(projectName) {
+                if (this.expandedClusters.has(projectName)) {
+                    this.expandedClusters.delete(projectName);
+                } else {
+                    this.expandedClusters.add(projectName);
+                }
+
                 this.renderConversations(this.conversations, this.conversationStates);
             }
 
@@ -4025,6 +4215,10 @@
                 if (!term) {
                     // If search is empty, collapse all projects and reset
                     this.expandedProjects.clear(); // Close all projects
+                    // Clusters live inside those projects, so they collapse too;
+                    // otherwise a re-render would reopen a cluster under a
+                    // project the user just saw close.
+                    if (this.expandedClusters) this.expandedClusters.clear();
 
                     projectGroups.forEach(group => {
                         group.style.display = 'block';
@@ -4033,6 +4227,11 @@
                         const conversations = group.querySelectorAll('.conversation-item');
                         conversations.forEach(conv => {
                             conv.style.display = 'none';
+                        });
+
+                        // ...and the automated-run sub-headers with them
+                        group.querySelectorAll('.cluster-header').forEach(header => {
+                            header.style.display = 'none';
                         });
 
                         // Update toggle icon to collapsed state
@@ -4049,6 +4248,13 @@
                     const projectName = group.dataset.project;
                     const projectNameLower = projectName.toLowerCase();
                     const conversations = group.querySelectorAll('.conversation-item');
+
+                    // A filtered list is flat: matches show wherever they live,
+                    // so the cluster sub-header (whose chevron would no longer
+                    // describe what is on screen) steps out of the way.
+                    group.querySelectorAll('.cluster-header').forEach(header => {
+                        header.style.display = 'none';
+                    });
 
                     let hasMatchingConversation = false;
 
@@ -4717,10 +4923,7 @@
              * @returns {string} Escaped text, always a string
              */
             escapeHtml(text) {
-                if (text === null || text === undefined) return '';
-                const div = document.createElement('div');
-                div.textContent = typeof text === 'string' ? text : String(text);
-                return div.innerHTML;
+                return escapeHtmlText(text);
             }
 
             /**
@@ -5152,12 +5355,37 @@
                 if (this.expandedProjects) {
                     this.expandedProjects.clear();
                 }
+                if (this.expandedClusters) {
+                    this.expandedClusters.clear();
+                }
 
                 // Hide search results info
                 searchResultsInfo.classList.remove('active');
 
                 // Reload all conversations
                 await this.loadConversations();
+            }
+
+            /**
+             * Session-source badge markup for a list row. Labels are a FIXED
+             * allowlist keyed on server-derived booleans; the raw entrypoint
+             * value is transcript-controlled and never reaches the DOM.
+             * Interactive CLI sessions (the norm) get no badge.
+             * @param {Object} conv - Summary or full conversation row
+             * @returns {string} Badge HTML or ''
+             */
+            getSourceBadge(conv) {
+                if (!conv) return '';
+                if (conv.isWorktreeAgent) {
+                    return '<span class="source-badge source-worktree">worktree agent</span>';
+                }
+                if (conv.isHeadless) {
+                    return '<span class="source-badge source-headless">headless</span>';
+                }
+                if (conv.entrypoint === 'claude-desktop') {
+                    return '<span class="source-badge source-desktop">desktop</span>';
+                }
+                return '';
             }
 
             getStateLabel(state) {
@@ -6085,7 +6313,7 @@
                             font-family: monospace;
                             color: var(--text-primary);
                         ">
-                            <span>${this.escapeHtml(usage.model)}</span>
+                            <span>${escapeHtmlText(usage.model)}</span>
                             <span style="
                                 padding: 2px 6px;
                                 background: rgba(139, 92, 246, 0.3);
@@ -6113,7 +6341,7 @@
                         return `
                             <div style="margin-bottom: 10px; padding: 8px; background: rgba(255,255,255,0.03); border-radius: 6px;">
                                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-                                    <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">${this.escapeHtml(tool)}</span>
+                                    <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">${escapeHtmlText(tool)}</span>
                                     <span style="font-size: 12px; color: var(--text-secondary);">${count} calls (${percentage}%)</span>
                                 </div>
                                 <div style="height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;">
@@ -6192,7 +6420,7 @@
                                     font-size: 12px;
                                     color: var(--text-primary);
                                 ">
-                                    <span>${this.escapeHtml(agent.type)}</span>
+                                    <span>${escapeHtmlText(agent.type)}</span>
                                     <span style="color: var(--text-secondary); font-size: 11px;">×${agent.count}</span>
                                 </span>
                             `;
@@ -6219,7 +6447,7 @@
                                     font-family: monospace;
                                     color: var(--text-primary);
                                 ">
-                                    <span>${this.escapeHtml(cmd.name)}</span>
+                                    <span>${escapeHtmlText(cmd.name)}</span>
                                     <span style="color: var(--text-secondary); font-size: 11px;">×${cmd.count}</span>
                                 </span>
                             `;
@@ -6245,7 +6473,7 @@
                                     font-size: 12px;
                                     color: var(--text-primary);
                                 ">
-                                    <span>${this.escapeHtml(skill.name)}</span>
+                                    <span>${escapeHtmlText(skill.name)}</span>
                                     <span style="color: var(--text-secondary); font-size: 11px;">×${skill.count}</span>
                                 </span>
                             `;

@@ -221,6 +221,37 @@ class DatabaseBackend {
   }
 
   /**
+   * Per-tool and per-kind usage rollups (canonical conversations only).
+   * @returns {{tools: Array, kinds: Array, mcpServers: Array}}
+   */
+  toolStats() {
+    if (!this.db) throw new Error('Database not initialized');
+    const { kinds, mcpServers } = this.db.getToolKindStats();
+    return { tools: this.db.getToolUsageStats(), kinds, mcpServers };
+  }
+
+  /**
+   * Conversations that changed files matching a path substring.
+   * @param {string} pathQuery
+   * @param {number} [limit]
+   * @returns {Array}
+   */
+  fileChanges(pathQuery, limit) {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db.getConversationsTouchingFile(pathQuery, limit);
+  }
+
+  /**
+   * Tool usage for one conversation (analytics modal shape).
+   * @param {string} conversationId
+   * @returns {Object}
+   */
+  conversationToolUsage(conversationId) {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db.getConversationToolUsage(conversationId);
+  }
+
+  /**
    * Role/tool-granular search (message_fts). Same transformed shape as
    * searchConversationsWithSnippets, plus matchedRole/matchedSeq.
    * @param {string} query
@@ -364,6 +395,12 @@ class DatabaseBackend {
       },
       // Subagent hierarchy fields
       isSubagent: conv.isSubagent || false,
+      // Agent-worktree sessions: subagent-like, but with no parent session
+      // recorded in the transcript. Consumers use this to label them.
+      isWorktreeAgent: conv.isWorktreeAgent || false,
+      // Headless (sdk-*) vs interactive (cli / claude-desktop) invocation.
+      entrypoint: conv.entrypoint || null,
+      isHeadless: conv.isHeadless || false,
       parentId: conv.parentId || null
     };
   }

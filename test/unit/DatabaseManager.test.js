@@ -169,6 +169,50 @@ describe('DatabaseManager', () => {
       expect(readTool.total_calls).toBe(5);
     });
 
+    it('round-trips the agent-worktree flag', () => {
+      // A worktree agent is subagent-like but parentless, so is_worktree_agent
+      // is the only thing that distinguishes it from a spawned subagent.
+      const conv = createMockConversation({
+        id: 'worktree-agent-001',
+        project: 'demo',
+        cwd: '/work/demo/.worktrees/agent-fix-1',
+        isSubagent: true,
+        isWorktreeAgent: true,
+        parentId: null,
+      });
+      db.upsertConversation(conv, 'worktree agent content');
+
+      expect(db.getConversation('worktree-agent-001').isWorktreeAgent).toBe(true);
+
+      const listed = db.getConversations({ includeSubagents: true })
+        .find(c => c.id === 'worktree-agent-001');
+      expect(listed.isWorktreeAgent).toBe(true);
+      expect(listed.parentId).toBeNull();
+
+      // An ordinary conversation reports false, not undefined.
+      db.upsertConversation(createMockConversation({ id: 'plain-001' }), 'plain content');
+      expect(db.getConversation('plain-001').isWorktreeAgent).toBe(false);
+    });
+
+    it('round-trips the entrypoint and derives headlessness from it', () => {
+      db.upsertConversation(createMockConversation({
+        id: 'headless-001',
+        entrypoint: 'sdk-py',
+      }), 'python sdk content');
+      // No entrypoint: pre-field transcripts and interactive CLI sessions both
+      // have to read as interactive rather than unknown.
+      db.upsertConversation(createMockConversation({ id: 'interactive-001' }), 'plain content');
+
+      const byId = Object.fromEntries(
+        db.getConversations({ includeSubagents: true }).map(c => [c.id, c])
+      );
+
+      expect(byId['headless-001'].entrypoint).toBe('sdk-py');
+      expect(byId['headless-001'].isHeadless).toBe(true);
+      expect(byId['interactive-001'].entrypoint).toBeNull();
+      expect(byId['interactive-001'].isHeadless).toBe(false);
+    });
+
     it('handles subagent conversations', () => {
       const conv = createMockConversation({
         id: 'parent-001_agent-1',
@@ -623,7 +667,8 @@ describe('DatabaseManager', () => {
       for (let i = 0; i < 100; i++) put.run(`/backlog-${i}.jsonl`, 1, 2, 3, 0);
       expect(db.hasPendingRebuild()).toBe(true);
 
-      db.db.prepare(`UPDATE file_index SET content_version = 4`).run();
+      const target = db.db.pragma('user_version', { simple: true });
+      db.db.prepare(`UPDATE file_index SET content_version = ?`).run(target);
       expect(db.hasPendingRebuild()).toBe(false);
     });
 
@@ -661,8 +706,8 @@ describe('DatabaseManager', () => {
   });
 
   describe('FTS content version migration', () => {
-    it('initializes a fresh database at the current target version (4)', () => {
-      expect(db.db.pragma('user_version', { simple: true })).toBe(4);
+    it('initializes a fresh database at the current target version (5)', () => {
+      expect(db.db.pragma('user_version', { simple: true })).toBe(5);
     });
 
     it('marks files stale on a bump but KEEPS file_index so a rebuild resumes', () => {
@@ -675,7 +720,7 @@ describe('DatabaseManager', () => {
       // Re-run the migration as a fresh startup would.
       db._migrateFtsContentVersion();
 
-      expect(db.db.pragma('user_version', { simple: true })).toBe(4);
+      expect(db.db.pragma('user_version', { simple: true })).toBe(5);
 
       // The row survives. This is the resume checkpoint: deleting it (the old
       // behaviour) meant an interrupted rebuild restarted from zero, so a bump
@@ -700,6 +745,168 @@ describe('DatabaseManager', () => {
       db._migrateFtsContentVersion(); // already at 2
 
       expect(db.db.prepare(`SELECT COUNT(*) c FROM file_index`).get().c).toBe(1);
+    });
+  });
+
+  describe('v5 enrichment (tool taxonomy, file changes, src_line)', () => {
+    it('stores tool_kind, mcp_server and error_count on tool_usage rows', () => {
+      const conv = createMockConversation({
+        id: 'enrich-1',
+        toolUsage: {
+          total: 6,
+          tools: { Bash: 3, 'mcp__exa__web_search_exa': 2, Edit: 1 },
+          errors: { Bash: 2 },
+        },
+      });
+      db.upsertConversation(conv, createSearchableContent());
+
+      const rows = db.db.prepare(
+        `SELECT tool_name, tool_kind, mcp_server, call_count, error_count
+         FROM tool_usage WHERE conversation_id = ? ORDER BY tool_name`
+      ).all('enrich-1');
+
+      expect(rows).toEqual([
+        { tool_name: 'Bash', tool_kind: 'shell', mcp_server: null, call_count: 3, error_count: 2 },
+        { tool_name: 'Edit', tool_kind: 'file_edit', mcp_server: null, call_count: 1, error_count: 0 },
+        { tool_name: 'mcp__exa__web_search_exa', tool_kind: 'mcp', mcp_server: 'exa', call_count: 2, error_count: 0 },
+      ]);
+    });
+
+    it('replaces file_changes on re-index instead of accumulating duplicates', () => {
+      const conv = createMockConversation({
+        id: 'enrich-fc',
+        fileChanges: [
+          { seq: 0, src_line: 7, path: '/repo/a.js', change_kind: 'edit', added_lines: 2, removed_lines: 1 },
+          { seq: 1, src_line: 9, path: '/repo/b.js', change_kind: 'create', added_lines: 10, removed_lines: 0 },
+        ],
+      });
+      db.upsertConversation(conv, createSearchableContent());
+      // Re-index with one change: the old rows must not survive.
+      db.upsertConversation({
+        ...conv,
+        fileChanges: [{ seq: 0, src_line: 7, path: '/repo/a.js', change_kind: 'edit', added_lines: 3, removed_lines: 3 }],
+      }, createSearchableContent());
+
+      const rows = db.db.prepare(
+        `SELECT path, change_kind, added_lines, removed_lines, src_line
+         FROM file_changes WHERE conversation_id = ?`
+      ).all('enrich-fc');
+      expect(rows).toEqual([
+        { path: '/repo/a.js', change_kind: 'edit', added_lines: 3, removed_lines: 3, src_line: 7 },
+      ]);
+    });
+
+    it('skips malformed file_change entries instead of writing partial rows', () => {
+      const conv = createMockConversation({
+        id: 'enrich-bad-fc',
+        fileChanges: [null, { path: '', change_kind: 'edit' }, { path: '/ok.js' }],
+      });
+      db.upsertConversation(conv, createSearchableContent());
+      expect(db.db.prepare(
+        `SELECT COUNT(*) c FROM file_changes WHERE conversation_id = ?`
+      ).get('enrich-bad-fc').c).toBe(0);
+    });
+
+    it('stores src_line on message records', () => {
+      const conv = createMockConversation({ id: 'enrich-src' });
+      db.upsertConversation(conv, createSearchableContent(), [
+        { seq: 0, src_line: 12, role: 'user', tool_name: null, text: 'hello there' },
+        { seq: 1, role: 'assistant', tool_name: null, text: 'no line recorded' },
+      ]);
+
+      const rows = db.db.prepare(
+        `SELECT seq, src_line FROM messages WHERE conversation_id = ? ORDER BY seq`
+      ).all('enrich-src');
+      expect(rows).toEqual([
+        { seq: 0, src_line: 12 },
+        { seq: 1, src_line: null },
+      ]);
+    });
+
+    it('getToolUsageStats excludes subagent transcripts and empty sessions (canonical filter)', () => {
+      db.upsertConversation(createMockConversation({
+        id: 'canon-main',
+        messageCount: 5,
+        toolUsage: { total: 2, tools: { Bash: 2 }, errors: { Bash: 1 } },
+      }), createSearchableContent());
+      db.upsertConversation(createMockConversation({
+        id: 'canon-sub',
+        isSubagent: true,
+        parentId: 'canon-main',
+        messageCount: 5,
+        toolUsage: { total: 9, tools: { Bash: 9 }, errors: {} },
+      }), createSearchableContent());
+      db.upsertConversation(createMockConversation({
+        id: 'canon-empty',
+        messageCount: 0,
+        toolUsage: { total: 7, tools: { Bash: 7 }, errors: {} },
+      }), createSearchableContent());
+
+      const stats = db.getToolUsageStats();
+      const bash = stats.find(s => s.tool_name === 'Bash');
+      expect(bash.total_calls).toBe(2);
+      expect(bash.total_errors).toBe(1);
+      expect(bash.conversations).toBe(1);
+    });
+
+    it('getToolKindStats rolls up by kind and by MCP server', () => {
+      db.upsertConversation(createMockConversation({
+        id: 'kinds-1',
+        messageCount: 3,
+        toolUsage: {
+          total: 5,
+          tools: { Bash: 2, Read: 1, 'mcp__linear__save_issue': 2 },
+          errors: { 'mcp__linear__save_issue': 1 },
+        },
+      }), createSearchableContent());
+
+      const { kinds, mcpServers } = db.getToolKindStats();
+      const byKind = Object.fromEntries(kinds.map(k => [k.tool_kind, k.total_calls]));
+      expect(byKind.shell).toBe(2);
+      expect(byKind.file_read).toBe(1);
+      expect(byKind.mcp).toBe(2);
+      expect(mcpServers).toEqual([
+        { mcp_server: 'linear', total_calls: 2, total_errors: 1, conversations: 1 },
+      ]);
+    });
+
+    it('getConversationsTouchingFile matches by substring and treats % literally', () => {
+      db.upsertConversation(createMockConversation({
+        id: 'touch-1',
+        messageCount: 2,
+        fileChanges: [
+          { seq: 0, src_line: 3, path: '/repo/src/App.js', change_kind: 'edit', added_lines: 4, removed_lines: 2 },
+          { seq: 1, src_line: 5, path: '/repo/src/App.js', change_kind: 'edit', added_lines: 1, removed_lines: 1 },
+        ],
+      }), createSearchableContent());
+
+      const hits = db.getConversationsTouchingFile('src/App');
+      expect(hits).toHaveLength(1);
+      expect(hits[0].id).toBe('touch-1');
+      expect(hits[0].change_count).toBe(2);
+      expect(hits[0].added_lines).toBe(5);
+      expect(hits[0].removed_lines).toBe(3);
+
+      // A wildcard in the query must not match everything.
+      expect(db.getConversationsTouchingFile('%')).toEqual([]);
+      expect(db.getConversationsTouchingFile('')).toEqual([]);
+    });
+
+    it('adds enrichment columns to a database created on the old shape', () => {
+      // Simulate a v4-era table without the new columns.
+      db.db.exec(`
+        DROP TABLE tool_usage;
+        CREATE TABLE tool_usage (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          conversation_id TEXT NOT NULL,
+          tool_name TEXT NOT NULL,
+          call_count INTEGER DEFAULT 1,
+          UNIQUE(conversation_id, tool_name)
+        );
+      `);
+      db._migrateEnrichmentColumns();
+      const cols = db.db.prepare(`PRAGMA table_info(tool_usage)`).all().map(c => c.name);
+      expect(cols).toEqual(expect.arrayContaining(['tool_kind', 'mcp_server', 'error_count']));
     });
   });
 });

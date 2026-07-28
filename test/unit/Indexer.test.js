@@ -344,49 +344,106 @@ describe('Indexer', () => {
     });
   });
 
-  describe('_extractToolNames()', () => {
-    it('extracts tool names from tool_use blocks', () => {
-      const content = [
-        { type: 'text', text: 'Some text' },
-        { type: 'tool_use', id: 'tool1', name: 'Read', input: {} },
-        { type: 'tool_use', id: 'tool2', name: 'Write', input: {} },
-      ];
-      const result = indexer._extractToolNames(content);
+  describe('tool extraction and v5 enrichment (parse path)', () => {
+    async function writeJsonl(lines) {
+      const p = path.join(projectsDir, `enrich-${Date.now()}-${Math.random().toString(36).slice(2)}.jsonl`);
+      await fs.writeFile(p, lines.map(l => JSON.stringify(l)).join('\n'));
+      return p;
+    }
 
-      expect(result).toContain('Read');
-      expect(result).toContain('Write');
-      expect(result.length).toBe(2);
+    it('counts tool_use blocks, skipping blocks without a name, and handles single-object content', async () => {
+      const p = await writeJsonl([
+        { type: 'assistant', message: { role: 'assistant', content: [
+          { type: 'text', text: 'Some text' },
+          { type: 'tool_use', id: 'tool1', name: 'Read', input: {} },
+          { type: 'tool_use', id: 'tool2', input: {} }, // no name: skipped
+        ] } },
+        { type: 'assistant', message: { role: 'assistant', content: { type: 'tool_use', name: 'Bash', input: {} } } },
+      ]);
+      const result = await indexer._parseJsonlStreaming(p);
+
+      expect(result.toolUsage.tools).toEqual({ Read: 1, Bash: 1 });
+      expect(result.toolUsage.total).toBe(2);
     });
 
-    it('handles single tool_use object', () => {
-      const content = { type: 'tool_use', name: 'Bash', input: {} };
-      const result = indexer._extractToolNames(content);
+    it('correlates tool_result errors by tool_use_id, not by array order', async () => {
+      const p = await writeJsonl([
+        { type: 'assistant', message: { role: 'assistant', content: [
+          { type: 'tool_use', id: 'toolu_A', name: 'Read', input: {} },
+          { type: 'tool_use', id: 'toolu_B', name: 'Bash', input: { command: 'x' } },
+        ] } },
+        // Results arrive in the opposite order of the calls; only B errored.
+        { type: 'user', message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: 'toolu_B', content: 'boom', is_error: true },
+          { type: 'tool_result', tool_use_id: 'toolu_A', content: 'fine' },
+        ] } },
+      ]);
+      const result = await indexer._parseJsonlStreaming(p);
 
-      expect(result).toContain('Bash');
+      expect(result.toolUsage.errors).toEqual({ Bash: 1 });
     });
 
-    it('returns empty array for content without tools', () => {
-      const content = [
-        { type: 'text', text: 'Just text' },
-      ];
-      const result = indexer._extractToolNames(content);
-
-      expect(result).toEqual([]);
+    it('ignores errors whose tool_use_id matches no known call', async () => {
+      const p = await writeJsonl([
+        { type: 'user', message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: 'toolu_ghost', content: 'boom', is_error: true },
+        ] } },
+      ]);
+      const result = await indexer._parseJsonlStreaming(p);
+      expect(result.toolUsage.errors).toEqual({});
     });
 
-    it('returns empty array for null content', () => {
-      expect(indexer._extractToolNames(null)).toEqual([]);
-      expect(indexer._extractToolNames(undefined)).toEqual([]);
+    it('extracts file changes from edit tools with src_line provenance', async () => {
+      const p = await writeJsonl([
+        { type: 'user', message: { role: 'user', content: 'edit please' } },
+        { type: 'assistant', message: { role: 'assistant', content: [
+          { type: 'tool_use', id: 't1', name: 'Edit', input: {
+            file_path: '/repo/a.js', old_string: 'x\ny', new_string: 'x' } },
+          { type: 'tool_use', id: 't2', name: 'Bash', input: { command: 'ls' } },
+        ] } },
+      ]);
+      const result = await indexer._parseJsonlStreaming(p);
+
+      expect(result.fileChanges).toEqual([
+        { seq: 0, src_line: 2, path: '/repo/a.js', change_kind: 'edit', added_lines: 1, removed_lines: 2 },
+      ]);
     });
 
-    it('skips tool_use blocks without name', () => {
-      const content = [
-        { type: 'tool_use', id: 'tool1', input: {} },
-        { type: 'tool_use', id: 'tool2', name: 'ValidTool', input: {} },
-      ];
-      const result = indexer._extractToolNames(content);
+    it('stamps message records with their 1-based transcript line', async () => {
+      const p = await writeJsonl([
+        { type: 'user', message: { role: 'user', content: 'first line' } },
+        { type: 'assistant', message: { role: 'assistant', content: 'second line' } },
+      ]);
+      const result = await indexer._parseJsonlStreaming(p);
 
-      expect(result).toEqual(['ValidTool']);
+      expect(result.messages.map(m => m.src_line)).toEqual([1, 2]);
+    });
+
+    it('captures the entrypoint from message records, first seen winning', async () => {
+      // The field sits on the record, not inside message. A resumed session can
+      // be re-entered from a different entrypoint later in the same transcript;
+      // how the session STARTED is what classifies it, so the first wins.
+      const p = await writeJsonl([
+        { type: 'user', entrypoint: 'sdk-cli', message: { role: 'user', content: 'headless run' } },
+        { type: 'assistant', entrypoint: 'cli', message: { role: 'assistant', content: 'resumed interactively' } },
+      ]);
+      expect((await indexer._parseJsonlStreaming(p)).entrypoint).toBe('sdk-cli');
+    });
+
+    it('skips leading records that carry no entrypoint', async () => {
+      // Transcripts often open with a summary record from context compaction.
+      const p = await writeJsonl([
+        { type: 'summary', summary: 'earlier session' },
+        { type: 'user', entrypoint: 'claude-desktop', message: { role: 'user', content: 'hello' } },
+      ]);
+      expect((await indexer._parseJsonlStreaming(p)).entrypoint).toBe('claude-desktop');
+    });
+
+    it('reports a null entrypoint when the transcript predates the field', async () => {
+      const p = await writeJsonl([
+        { type: 'user', message: { role: 'user', content: 'no entrypoint here' } },
+      ]);
+      expect((await indexer._parseJsonlStreaming(p)).entrypoint).toBeNull();
     });
   });
 
