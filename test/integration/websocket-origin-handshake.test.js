@@ -2,7 +2,7 @@
  * WebSocket handshake origin-rejection integration test.
  *
  * The unit tests in test/unit/WebSocketServer-origin.test.js pin verifyOrigin's
- * logic, but they call it through the prototype with a stub `this` — so every
+ * logic, but they call it through the prototype with a stub `this`, so every
  * one of them stays green even if the `verifyClient` option is deleted from
  * initialize() and the guard is never wired to the server at all.
  *

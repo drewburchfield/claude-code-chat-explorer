@@ -116,7 +116,13 @@ class DataService {
    * @returns {Promise<Object>} Conversations data
    */
   async getConversations() {
-    return await this.cachedFetch('/api/data');
+    // '/api/data' is not a route this server serves, so it 404'd on every call.
+    // That silently killed the WebSocket fallback: startFallbackPolling() would
+    // poll, every request would throw, and the UI would sit frozen while still
+    // reporting "polling mode active". The real route is '/api/conversations'
+    // (the same one getConversationsPaginated already uses) and it returns the
+    // { conversations: [...] } shape callers destructure.
+    return await this.cachedFetch('/api/conversations');
   }
 
   /**
@@ -262,8 +268,11 @@ class DataService {
    * @param {Object} data - Fresh data from server
    */
   handleRealTimeDataRefresh(data) {
-    // Clear relevant cache entries
-    this.clearCacheEntry('/api/data');
+    // Clear relevant cache entries. Must match the keys cachedFetch actually
+    // stores, i.e. the real routes. Invalidating '/api/data' cleared nothing
+    // and left getConversations() serving a stale cached payload after a
+    // real-time refresh.
+    this.clearCacheEntry('/api/conversations');
     this.clearCacheEntry('/api/conversation-state');
     
     // Notify listeners

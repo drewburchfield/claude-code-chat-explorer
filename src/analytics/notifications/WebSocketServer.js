@@ -59,7 +59,7 @@ class WebSocketServer {
    * This is CSRF protection, not authentication. A browser always sends an
    * Origin header on a WebSocket handshake; a non-browser client (native ws,
    * tests, curl) sends none and carries no ambient-authority risk, so those are
-   * allowed — this check deliberately does not try to stop a direct client.
+   * allowed. This check deliberately does not try to stop a direct client.
    *
    * For browser clients we require the Origin's host to equal the request Host
    * header. That is same host-and-port; scheme is not compared, because a

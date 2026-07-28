@@ -3194,7 +3194,7 @@
                             : '';
 
                         return `
-                            <div class="conversation-item${subagentClass}${stubClass}" data-conversation-id="${conv.id}" style="display: ${isExpanded ? 'flex' : 'none'}">
+                            <div class="conversation-item${subagentClass}${stubClass}" data-conversation-id="${this.escapeAttr(conv.id)}" style="display: ${isExpanded ? 'flex' : 'none'}">
                                 <div class="conversation-avatar conversation-avatar-small">
                                     ${conversationId.substring(0, 2).toUpperCase()}
                                 </div>
@@ -3213,10 +3213,13 @@
                         `;
                     }).join('');
 
+                    // Element-content vs attribute need different escaping: the
+                    // name is rendered as text AND used in data-project="...".
                     const escapedProjectName = this.escapeHtml(projectName);
+                    const projectNameAttr = this.escapeAttr(projectName);
                     return `
-                        <div class="project-group${todayClass}" data-project="${escapedProjectName}">
-                            <div class="project-header${todayClass}" data-project="${escapedProjectName}">
+                        <div class="project-group${todayClass}" data-project="${projectNameAttr}">
+                            <div class="project-header${todayClass}" data-project="${projectNameAttr}">
                                 <div class="project-avatar">
                                     ${this.escapeHtml(firstLetter)}
                                 </div>
@@ -3634,13 +3637,13 @@
                 const messageIndexAttr = messageIndex !== undefined ? ` data-message-index="${messageIndex}"` : '';
 
                 return `
-                    <div class="message message-${isUser ? 'user' : 'assistant'}${hasToolsClass}" data-message-id="${message.id || ''}"${messageIndexAttr}>
+                    <div class="message message-${isUser ? 'user' : 'assistant'}${hasToolsClass}" data-message-id="${this.escapeAttr(message.id || '')}"${messageIndexAttr}>
                         <div class="message-bubble">
                             <div class="message-content">
                                 ${this.formatMessageContent(message.content, message)}
                             </div>
                             <div class="message-meta">
-                                <span class="message-time" title="${fullTimestamp}">${timestamp}</span>
+                                <span class="message-time" title="${this.escapeAttr(fullTimestamp)}">${timestamp}</span>
                                 ${hasTools ? `<span class="tool-indicator">🔧 ${toolCount}</span>` : ''}
                                 ${message.usage && (message.usage.input_tokens > 0 || message.usage.output_tokens > 0) ? `
                                     <span class="token-indicator">
@@ -4001,7 +4004,7 @@
             // NOTE: escapeHtml is defined once, further down in this class. A
             // second definition used to live here; duplicate class methods are
             // legal JS and the LAST one silently wins, so this copy was dead
-            // code — and dangerously so, because it returned non-string input
+            // code, and dangerously so, because it returned non-string input
             // unescaped (`if (typeof text !== 'string') return text`). Had the
             // other definition ever been removed, that fail-open branch would
             // have become the live escaper. Keep exactly one.
@@ -4635,9 +4638,9 @@
                     const isSelected = dir === currentValue;
 
                     return `
-                        <div class="folder-item ${isSelected ? 'selected' : ''}" data-path="${this.escapeHtml(dir)}">
+                        <div class="folder-item ${isSelected ? 'selected' : ''}" data-path="${this.escapeAttr(dir)}">
                             <span class="folder-icon">📁</span>
-                            <span class="folder-path" title="${this.escapeHtml(dir)}">${this.escapeHtml(dir)}</span>
+                            <span class="folder-path" title="${this.escapeAttr(dir)}">${this.escapeHtml(dir)}</span>
                             <span class="folder-count">${count}</span>
                         </div>
                     `;
@@ -4695,6 +4698,34 @@
                 const div = document.createElement('div');
                 div.textContent = typeof text === 'string' ? text : String(text);
                 return div.innerHTML;
+            }
+
+            /**
+             * Escape a value for interpolation into a quoted HTML ATTRIBUTE.
+             *
+             * escapeHtml() is not sufficient here. It serializes through a text
+             * node, which neutralizes & < > but leaves " and ' intact. That is fine for
+             * element content, but in `attr="${value}"` a single double-quote
+             * closes the attribute and everything after it is parsed as more
+             * attributes. A transcript carrying
+             *   "id": "x\" onmouseover=\"alert(1)"
+             * would inject an event handler on the message element.
+             *
+             * Transcript ids/uuids flow straight from the JSONL
+             * (ConversationAnalyzer: `item.message.id || item.uuid`), so they are
+             * attacker-controlled for a crafted or imported session.
+             *
+             * @param {*} value - Value to escape
+             * @returns {string} Escaped text, always a string, safe in quoted attributes
+             */
+            escapeAttr(value) {
+                if (value === null || value === undefined) return '';
+                return String(value)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
             }
 
             // In-Conversation Search Methods
@@ -4913,9 +4944,9 @@
              * highlight span, mutating the live DOM.
              *
              * This must never round-trip through innerHTML. The previous version
-             * read element.innerHTML, pulled `.textContent` off a scratch div —
+             * read element.innerHTML, pulled `.textContent` off a scratch div,
              * which DECODES entities, turning an escaped "&lt;img onerror=...&gt;"
-             * back into live markup — and assigned the result straight back to
+             * back into live markup, and assigned the result straight back to
              * innerHTML, resurrecting the very stored XSS that formatTextContent
              * escapes. Walking text nodes never re-parses transcript text as HTML.
              *
