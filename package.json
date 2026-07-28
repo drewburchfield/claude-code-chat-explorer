@@ -46,7 +46,8 @@
   },
   "overrides": {
     "postcss": "8.5.19",
-    "@hono/node-server": "2.0.11"
+    "@hono/node-server": "2.0.11",
+    "@napi-rs/wasm-runtime": "1.1.6"
   },
   "engines": {
     "node": ">=20 <26"
