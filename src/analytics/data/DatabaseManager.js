@@ -759,6 +759,15 @@ class DatabaseManager {
         LIMIT 1
       `);
 
+      // Fallback preview for a conversation that matched ACROSS messages: every
+      // term is present somewhere, but no single message holds them all, so the
+      // per-message MATCH above returns nothing. Without this the row renders
+      // blank, which reads as a broken result rather than a valid one.
+      const previewStmt = this.db.prepare(`
+        SELECT substr(content, 1, 160) AS preview
+        FROM messages WHERE conversation_id = ? ORDER BY seq LIMIT 1
+      `);
+
       return rows.map(row => {
         let snippet = null;
         try {
@@ -766,6 +775,12 @@ class DatabaseManager {
         } catch {
           // A query shape valid at conversation level may not resolve per
           // message; the result is still valid, just without a preview.
+        }
+        if (!snippet) {
+          try {
+            const p = previewStmt.get(row.id)?.preview;
+            if (p) snippet = p + '...';
+          } catch { /* preview is best-effort */ }
         }
         return {
           ...this._rowToConversation(row),

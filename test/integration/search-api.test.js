@@ -113,6 +113,19 @@ describe('SearchService REST surface', () => {
     expect(ids).toEqual(['b']);
   });
 
+  it('matches terms spread ACROSS messages, and still returns a preview', async () => {
+    // Session 'a' is: user "the quick brown fox", assistant "ok". Neither term
+    // pair lives in one message, so this only matches via the conversation-level
+    // index. Collapsing search onto message_fts alone would silently drop it.
+    const res = await request(app.app).post('/api/search')
+      .send({ contentSearch: 'fox ok' }).expect(200);
+    const hit = res.body.results.find(r => r.id === 'a');
+    expect(hit).toBeTruthy();
+    // No single message contains both terms, so the per-message snippet query
+    // finds nothing; the row must still carry a preview rather than render blank.
+    expect(hit.snippet).toBeTruthy();
+  });
+
   describe('GET /api/conversations projection and paging', () => {
     it('returns the full record by default (unchanged for existing consumers)', async () => {
       const res = await request(app.app).get('/api/conversations').expect(200);
