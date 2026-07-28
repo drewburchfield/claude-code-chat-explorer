@@ -194,6 +194,25 @@ describe('DatabaseManager', () => {
       expect(db.getConversation('plain-001').isWorktreeAgent).toBe(false);
     });
 
+    it('round-trips the entrypoint and derives headlessness from it', () => {
+      db.upsertConversation(createMockConversation({
+        id: 'headless-001',
+        entrypoint: 'sdk-py',
+      }), 'python sdk content');
+      // No entrypoint: pre-field transcripts and interactive CLI sessions both
+      // have to read as interactive rather than unknown.
+      db.upsertConversation(createMockConversation({ id: 'interactive-001' }), 'plain content');
+
+      const byId = Object.fromEntries(
+        db.getConversations({ includeSubagents: true }).map(c => [c.id, c])
+      );
+
+      expect(byId['headless-001'].entrypoint).toBe('sdk-py');
+      expect(byId['headless-001'].isHeadless).toBe(true);
+      expect(byId['interactive-001'].entrypoint).toBeNull();
+      expect(byId['interactive-001'].isHeadless).toBe(false);
+    });
+
     it('handles subagent conversations', () => {
       const conv = createMockConversation({
         id: 'parent-001_agent-1',

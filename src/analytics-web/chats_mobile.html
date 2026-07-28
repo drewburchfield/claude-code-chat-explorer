@@ -482,6 +482,30 @@
             margin-right: 6px;
         }
 
+        /* Session-source badges (headless / desktop / worktree agent).
+           Interactive CLI sessions carry no badge. */
+        .source-badge {
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.4px;
+            text-transform: uppercase;
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin-right: 6px;
+        }
+        .source-badge.source-headless {
+            color: #b48ede;
+            background: rgba(140, 82, 200, 0.15);
+        }
+        .source-badge.source-desktop {
+            color: #6db3d6;
+            background: rgba(70, 140, 180, 0.15);
+        }
+        .source-badge.source-worktree {
+            color: #d6a86d;
+            background: rgba(180, 130, 60, 0.15);
+        }
+
         /* Subagent count badge */
         .subagent-count {
             font-size: 11px;
@@ -3216,6 +3240,12 @@
                         const subagentCount = (conv.subagentCount && conv.subagentCount > 0)
                             ? `<span class="subagent-count">${conv.subagentCount} subagent${conv.subagentCount > 1 ? 's' : ''}</span>`
                             : '';
+                        // Session-source badge. Labels come from a FIXED map
+                        // keyed on server-derived flags; the raw entrypoint
+                        // string is transcript-controlled and is never
+                        // interpolated into markup. Interactive CLI is the
+                        // norm and gets no badge.
+                        const sourceBadge = this.getSourceBadge(conv);
 
                         return `
                             <div class="conversation-item${subagentClass}${stubClass}" data-conversation-id="${this.escapeAttr(conv.id)}" style="display: ${isExpanded ? 'flex' : 'none'}">
@@ -3225,7 +3255,7 @@
                                 <div class="conversation-content">
                                     <div class="conversation-header">
                                         <div class="conversation-name">Session ${conversationId}</div>
-                                        ${subagentBadge}${subagentCount}
+                                        ${sourceBadge}${subagentBadge}${subagentCount}
                                         <div class="conversation-time">${lastActivity}</div>
                                     </div>
                                     <div class="conversation-meta">
@@ -5172,6 +5202,28 @@
 
                 // Reload all conversations
                 await this.loadConversations();
+            }
+
+            /**
+             * Session-source badge markup for a list row. Labels are a FIXED
+             * allowlist keyed on server-derived booleans; the raw entrypoint
+             * value is transcript-controlled and never reaches the DOM.
+             * Interactive CLI sessions (the norm) get no badge.
+             * @param {Object} conv - Summary or full conversation row
+             * @returns {string} Badge HTML or ''
+             */
+            getSourceBadge(conv) {
+                if (!conv) return '';
+                if (conv.isWorktreeAgent) {
+                    return '<span class="source-badge source-worktree">worktree agent</span>';
+                }
+                if (conv.isHeadless) {
+                    return '<span class="source-badge source-headless">headless</span>';
+                }
+                if (conv.entrypoint === 'claude-desktop') {
+                    return '<span class="source-badge source-desktop">desktop</span>';
+                }
+                return '';
             }
 
             getStateLabel(state) {

@@ -44,22 +44,23 @@ describe('v5 enrichment pipeline', () => {
     await fs.writeFile(path.join(proj, 'enriched.jsonl'),
       lines.map(l => JSON.stringify(l)).join('\n') + '\n');
 
-    // An agent that ran in an isolated worktree of the SAME repo. Claude Code
-    // keys the transcript directory off the cwd, so this lands in its own
-    // top-level folder and carries no parent linkage - the cwd is the only
-    // signal that it is not a project of its own.
+    // An agent that ran in an isolated worktree of the SAME repo, launched
+    // headlessly (`claude -p` / SDK CLI, which stamps entrypoint "sdk-cli").
+    // Claude Code keys the transcript directory off the cwd, so this lands in
+    // its own top-level folder and carries no parent linkage - the cwd is the
+    // only signal that it is not a project of its own.
     const wtProj = path.join(claudeDir, 'projects', '-work-demo--worktrees-agent-fix-1');
     await fs.ensureDir(wtProj);
     const wtCwd = '/work/demo/.worktrees/agent-fix-1';
     const wtLines = [
-      { type: 'user', timestamp: ts(20), message: { role: 'user', content: 'run the isolated fix' }, cwd: wtCwd },
-      { type: 'assistant', timestamp: ts(25), message: { role: 'assistant', model: 'claude-opus-4', content: [
+      { type: 'user', timestamp: ts(20), entrypoint: 'sdk-cli', message: { role: 'user', content: 'run the isolated fix' }, cwd: wtCwd },
+      { type: 'assistant', timestamp: ts(25), entrypoint: 'sdk-cli', message: { role: 'assistant', model: 'claude-opus-4', content: [
         { type: 'tool_use', id: 'toolu_wt', name: 'WorktreeOnlyTool', input: { note: 'unique to the worktree session' } },
       ] } },
-      { type: 'user', timestamp: ts(30), message: { role: 'user', content: [
+      { type: 'user', timestamp: ts(30), entrypoint: 'sdk-cli', message: { role: 'user', content: [
         { type: 'tool_result', tool_use_id: 'toolu_wt', content: 'done' },
       ] } },
-      { type: 'assistant', timestamp: ts(35), message: { role: 'assistant', model: 'claude-opus-4', content: 'isolated fix applied' } },
+      { type: 'assistant', timestamp: ts(35), entrypoint: 'sdk-cli', message: { role: 'assistant', model: 'claude-opus-4', content: 'isolated fix applied' } },
     ];
     await fs.writeFile(path.join(wtProj, 'wt-agent.jsonl'),
       wtLines.map(l => JSON.stringify(l)).join('\n') + '\n');
@@ -163,6 +164,34 @@ describe('v5 enrichment pipeline', () => {
       // is one; its calls would otherwise double-count the parent's work.
       expect(names).not.toContain('WorktreeOnlyTool');
       expect(names).toContain('Bash');
+    });
+  });
+
+  describe('headless session classification (entrypoint)', () => {
+    it('marks an sdk-cli session headless and leaves an entrypoint-less one interactive', async () => {
+      const res = await request(app.app)
+        .get('/api/conversations?includeSubagents=true').expect(200);
+
+      const wt = res.body.conversations.find(c => c.id === 'wt-agent');
+      expect(wt.entrypoint).toBe('sdk-cli');
+      expect(wt.isHeadless).toBe(true);
+
+      // Older transcripts predate the field entirely; absence must read as
+      // interactive, not as an unknown/undefined that the UI has to guess at.
+      const main = res.body.conversations.find(c => c.id === 'enriched');
+      expect(main.entrypoint).toBeNull();
+      expect(main.isHeadless).toBe(false);
+    });
+
+    it('carries the classification flags through the summary projection', async () => {
+      // view=summary hand-picks list-row fields, so a new flag is invisible to
+      // the list view until it is added there.
+      const res = await request(app.app).get('/api/conversations?view=summary').expect(200);
+      expect(res.body.conversations.length).toBeGreaterThan(0);
+      for (const row of res.body.conversations) {
+        expect(row).toHaveProperty('isHeadless');
+        expect(row).toHaveProperty('isWorktreeAgent');
+      }
     });
   });
 

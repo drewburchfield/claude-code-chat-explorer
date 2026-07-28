@@ -418,6 +418,33 @@ describe('Indexer', () => {
 
       expect(result.messages.map(m => m.src_line)).toEqual([1, 2]);
     });
+
+    it('captures the entrypoint from message records, first seen winning', async () => {
+      // The field sits on the record, not inside message. A resumed session can
+      // be re-entered from a different entrypoint later in the same transcript;
+      // how the session STARTED is what classifies it, so the first wins.
+      const p = await writeJsonl([
+        { type: 'user', entrypoint: 'sdk-cli', message: { role: 'user', content: 'headless run' } },
+        { type: 'assistant', entrypoint: 'cli', message: { role: 'assistant', content: 'resumed interactively' } },
+      ]);
+      expect((await indexer._parseJsonlStreaming(p)).entrypoint).toBe('sdk-cli');
+    });
+
+    it('skips leading records that carry no entrypoint', async () => {
+      // Transcripts often open with a summary record from context compaction.
+      const p = await writeJsonl([
+        { type: 'summary', summary: 'earlier session' },
+        { type: 'user', entrypoint: 'claude-desktop', message: { role: 'user', content: 'hello' } },
+      ]);
+      expect((await indexer._parseJsonlStreaming(p)).entrypoint).toBe('claude-desktop');
+    });
+
+    it('reports a null entrypoint when the transcript predates the field', async () => {
+      const p = await writeJsonl([
+        { type: 'user', message: { role: 'user', content: 'no entrypoint here' } },
+      ]);
+      expect((await indexer._parseJsonlStreaming(p)).entrypoint).toBeNull();
+    });
   });
 
   describe('_extractProjectFromPath()', () => {

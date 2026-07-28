@@ -398,6 +398,9 @@ class DatabaseBackend {
       // Agent-worktree sessions: subagent-like, but with no parent session
       // recorded in the transcript. Consumers use this to label them.
       isWorktreeAgent: conv.isWorktreeAgent || false,
+      // Headless (sdk-*) vs interactive (cli / claude-desktop) invocation.
+      entrypoint: conv.entrypoint || null,
+      isHeadless: conv.isHeadless || false,
       parentId: conv.parentId || null
     };
   }

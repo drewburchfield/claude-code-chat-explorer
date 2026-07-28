@@ -240,6 +240,7 @@ class Indexer {
       fileChanges: parseResult.fileChanges,
       isSubagent: isSubagent || isWorktreeAgent,
       isWorktreeAgent,
+      entrypoint: parseResult.entrypoint,
       parentId
     };
 
@@ -261,7 +262,8 @@ class Indexer {
         fileChanges: [],  // extracted from edit-tool inputs (ToolTaxonomy)
         searchableContent: '',
         messages: [],   // per-message records for role/tool-granular FTS
-        cwd: null  // Extract working directory for project name
+        cwd: null,  // Extract working directory for project name
+        entrypoint: null  // "cli" | "claude-desktop" | "sdk-cli" | "sdk-py" | ...
       };
 
       const contentParts = [];
@@ -304,6 +306,13 @@ class Indexer {
             } else if (item.message && item.message.cwd) {
               result.cwd = item.message.cwd;
             }
+          }
+
+          // Entrypoint: message records carry how the session was invoked
+          // ("cli" / "claude-desktop" are interactive; "sdk-cli" / "sdk-py"
+          // are headless SDK or `claude -p` invocations). First seen wins.
+          if (!result.entrypoint && item.entrypoint) {
+            result.entrypoint = item.entrypoint;
           }
 
           // Only count user/assistant messages
