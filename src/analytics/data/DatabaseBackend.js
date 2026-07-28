@@ -221,6 +221,27 @@ class DatabaseBackend {
   }
 
   /**
+   * Per-tool and per-kind usage rollups (canonical conversations only).
+   * @returns {{tools: Array, kinds: Array, mcpServers: Array}}
+   */
+  toolStats() {
+    if (!this.db) throw new Error('Database not initialized');
+    const { kinds, mcpServers } = this.db.getToolKindStats();
+    return { tools: this.db.getToolUsageStats(), kinds, mcpServers };
+  }
+
+  /**
+   * Conversations that changed files matching a path substring.
+   * @param {string} pathQuery
+   * @param {number} [limit]
+   * @returns {Array}
+   */
+  fileChanges(pathQuery, limit) {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db.getConversationsTouchingFile(pathQuery, limit);
+  }
+
+  /**
    * Role/tool-granular search (message_fts). Same transformed shape as
    * searchConversationsWithSnippets, plus matchedRole/matchedSeq.
    * @param {string} query

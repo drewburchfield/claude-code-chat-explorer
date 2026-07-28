@@ -625,6 +625,42 @@ class ChatsMobile {
       }
     });
 
+    // Tool-usage rollups: per tool, per kind, per MCP server. Canonical
+    // conversations only (no subagent transcripts, no empty sessions).
+    this.app.get('/api/analytics/tools', (req, res) => {
+      try {
+        if (!(this.useDatabaseBackend && this.databaseBackend.isInitialized)) {
+          return res.status(503).json({ error: 'Database backend not available' });
+        }
+        res.json(this.databaseBackend.toolStats());
+      } catch (error) {
+        console.error('Error serving tool stats:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+
+    // Which conversations changed a file. ?path= is a substring of the
+    // absolute path as it appeared in the tool input.
+    this.app.get('/api/analytics/file-changes', (req, res) => {
+      try {
+        if (!(this.useDatabaseBackend && this.databaseBackend.isInitialized)) {
+          return res.status(503).json({ error: 'Database backend not available' });
+        }
+        const pathQuery = typeof req.query.path === 'string' ? req.query.path : '';
+        if (!pathQuery.trim()) {
+          return res.status(400).json({ error: 'path query parameter is required' });
+        }
+        const limit = req.query.limit ? parseInt(req.query.limit, 10) : 50;
+        if (!Number.isInteger(limit) || limit <= 0) {
+          return res.status(400).json({ error: 'limit must be a positive integer' });
+        }
+        res.json({ changes: this.databaseBackend.fileChanges(pathQuery, limit) });
+      } catch (error) {
+        console.error('Error serving file changes:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+
     // API to search within a specific conversation
     this.app.post('/api/conversations/:id/search', async (req, res) => {
       try {

@@ -2,6 +2,7 @@ const chalk = require('chalk');
 const fs = require('fs-extra');
 const path = require('path');
 const readline = require('readline');
+const { fileChangeFromTool } = require('../core/ToolTaxonomy');
 
 // Per-block safety ceiling for FTS content. We no longer truncate at 2000
 // chars (that lost recall vs the on-disk text); the only cap is this generous
@@ -222,6 +223,7 @@ class Indexer {
       tokenUsage: parseResult.tokenUsage,
       modelInfo: parseResult.modelInfo,
       toolUsage: parseResult.toolUsage,
+      fileChanges: parseResult.fileChanges,
       isSubagent,
       parentId
     };
@@ -240,7 +242,8 @@ class Indexer {
         messageCount: 0,
         tokenUsage: { total: 0, input: 0, output: 0 },
         modelInfo: { primaryModel: null, models: {} },
-        toolUsage: { total: 0, tools: {} },
+        toolUsage: { total: 0, tools: {}, errors: {} },
+        fileChanges: [],  // extracted from edit-tool inputs (ToolTaxonomy)
         searchableContent: '',
         messages: [],   // per-message records for role/tool-granular FTS
         cwd: null  // Extract working directory for project name
@@ -248,7 +251,12 @@ class Indexer {
 
       const contentParts = [];
       const messageRecords = [];
+      // tool_use.id -> tool name, so a later tool_result's is_error can be
+      // attributed to the right tool. Correlation is by id, never by array
+      // order: one user message can carry several tool_result blocks.
+      const toolUseNames = new Map();
       let msgSeq = 0;
+      let fcSeq = 0;
       const modelCounts = {};
       let lineCount = 0;
       let parseErrorCount = 0;
@@ -297,8 +305,10 @@ class Indexer {
 
             // Per-message records (role/tool-granular). text+thinking under the
             // message's own role; tool_use/tool_result as separate 'tool' rows.
+            // src_line is the 1-based transcript line, recorded at parse time
+            // because it cannot be reconstructed later.
             for (const rec of this._extractMessageRecords(item.message.content, item.type)) {
-              messageRecords.push({ seq: msgSeq++, ...rec });
+              messageRecords.push({ seq: msgSeq++, src_line: lineCount, ...rec });
             }
 
             // Track token usage from assistant messages
@@ -314,12 +324,29 @@ class Indexer {
               modelCounts[model] = (modelCounts[model] || 0) + 1;
             }
 
-            // Track tool usage from assistant messages
+            // Track tool usage from assistant messages: counts, the id map
+            // for error correlation, and file changes from edit-tool inputs.
             if (item.type === 'assistant' && item.message.content) {
-              const tools = this._extractToolNames(item.message.content);
-              for (const tool of tools) {
-                result.toolUsage.tools[tool] = (result.toolUsage.tools[tool] || 0) + 1;
+              const blocks = Array.isArray(item.message.content)
+                ? item.message.content : [item.message.content];
+              for (const block of blocks) {
+                if (!block || block.type !== 'tool_use' || !block.name) continue;
+                result.toolUsage.tools[block.name] = (result.toolUsage.tools[block.name] || 0) + 1;
                 result.toolUsage.total++;
+                if (block.id) toolUseNames.set(block.id, block.name);
+                const fc = fileChangeFromTool(block.name, block.input);
+                if (fc) result.fileChanges.push({ seq: fcSeq++, src_line: lineCount, ...fc });
+              }
+            }
+
+            // Attribute tool_result errors to their tool via tool_use_id.
+            if (item.type === 'user' && Array.isArray(item.message.content)) {
+              for (const block of item.message.content) {
+                if (!block || block.type !== 'tool_result' || !block.is_error) continue;
+                const tool = block.tool_use_id ? toolUseNames.get(block.tool_use_id) : null;
+                if (tool) {
+                  result.toolUsage.errors[tool] = (result.toolUsage.errors[tool] || 0) + 1;
+                }
               }
             }
           } else if (item.type === 'system' && typeof item.content === 'string') {
@@ -520,26 +547,6 @@ class Indexer {
     }
 
     return String(payload);
-  }
-
-  /**
-   * Extract tool names from message content
-   * @private
-   */
-  _extractToolNames(content) {
-    const tools = [];
-
-    if (!content) return tools;
-
-    const blocks = Array.isArray(content) ? content : [content];
-
-    for (const block of blocks) {
-      if (block.type === 'tool_use' && block.name) {
-        tools.push(block.name);
-      }
-    }
-
-    return tools;
   }
 
   /**
