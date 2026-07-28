@@ -1023,13 +1023,29 @@ class ChatsMobile {
           return `${seconds}s`;
         };
 
+        // Tool usage: the database is the source of truth. The list rows the
+        // database backend serves carry a zeroed toolUsage placeholder (the
+        // analyzer shape is only populated in file-backed mode), which made
+        // the modal report 0 tools for every conversation.
+        let dbToolUsage = null;
+        if (this.useDatabaseBackend && this.databaseBackend.isInitialized) {
+          try {
+            dbToolUsage = this.databaseBackend.conversationToolUsage(conversationId);
+          } catch (err) {
+            console.warn(`⚠️ Tool usage lookup failed for ${conversationId}: ${err.message}`);
+          }
+        }
+        const effectiveToolCalls = dbToolUsage
+          ? dbToolUsage.totalCalls
+          : (conversation.toolUsage?.totalToolCalls || 0);
+
         // Generate optimization tips based on analytics
         const optimizationTips = [];
 
         if (cacheEfficiency < 20 && cacheTotal > 0) {
           optimizationTips.push('• Low cache efficiency detected. Consider restructuring prompts to maximize cache reuse.');
         }
-        if (conversation.toolUsage?.totalToolCalls > 50) {
+        if (effectiveToolCalls > 50) {
           optimizationTips.push('• High tool usage detected. Review if all tool calls are necessary.');
         }
         if (conversation.tokenUsage?.outputTokens > conversation.tokenUsage?.inputTokens * 2) {
@@ -1053,7 +1069,7 @@ class ChatsMobile {
           // Overview
           messageCount: messages.length,
           totalTokens: conversation.tokenUsage?.total || 0,
-          toolCalls: conversation.toolUsage?.totalToolCalls || 0,
+          toolCalls: effectiveToolCalls,
           cacheEfficiency: `${cacheEfficiency}%`,
 
           // Token breakdown. Source these from the freshly-attributed
@@ -1114,11 +1130,13 @@ class ChatsMobile {
             })()
           },
 
-          // Tool usage
+          // Tool usage (DB-backed when available; see dbToolUsage above)
           toolUsage: {
-            totalCalls: conversation.toolUsage?.totalToolCalls || 0,
-            uniqueTools: conversation.toolUsage?.uniqueTools || 0,
-            breakdown: conversation.toolUsage?.toolStats || {},
+            totalCalls: effectiveToolCalls,
+            totalErrors: dbToolUsage ? dbToolUsage.totalErrors : 0,
+            uniqueTools: dbToolUsage ? dbToolUsage.uniqueTools : (conversation.toolUsage?.uniqueTools || 0),
+            breakdown: dbToolUsage ? dbToolUsage.breakdown : (conversation.toolUsage?.toolStats || {}),
+            tools: dbToolUsage ? dbToolUsage.tools : [],
             timeline: conversation.toolUsage?.toolTimeline || []
           },
 

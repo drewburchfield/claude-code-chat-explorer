@@ -22,9 +22,10 @@ describe('v5 enrichment pipeline', () => {
     // A session with: a Bash call that errors, a Bash call that succeeds,
     // an MCP call, and an Edit that changes a file. Results correlate by
     // tool_use_id, deliberately out of order relative to the calls.
+    const ts = (s) => new Date(Date.UTC(2026, 0, 1, 12, 0, s)).toISOString();
     const lines = [
-      { type: 'user', message: { role: 'user', content: 'please fix the build' }, cwd: '/work/demo' },
-      { type: 'assistant', message: { role: 'assistant', model: 'claude-opus-4', content: [
+      { type: 'user', timestamp: ts(0), message: { role: 'user', content: 'please fix the build' }, cwd: '/work/demo' },
+      { type: 'assistant', timestamp: ts(5), message: { role: 'assistant', model: 'claude-opus-4', content: [
         { type: 'tool_use', id: 'toolu_ok', name: 'Bash', input: { command: 'npm test' } },
         { type: 'tool_use', id: 'toolu_bad', name: 'Bash', input: { command: 'npm run build' } },
         { type: 'tool_use', id: 'toolu_mcp', name: 'mcp__exa__web_search_exa', input: { query: 'error ENOENT' } },
@@ -32,13 +33,13 @@ describe('v5 enrichment pipeline', () => {
           file_path: '/work/demo/src/index.js', old_string: 'a\nb\nc', new_string: 'a\nc' } },
       ] } },
       // Results out of order: the error joins by id, never by position.
-      { type: 'user', message: { role: 'user', content: [
+      { type: 'user', timestamp: ts(10), message: { role: 'user', content: [
         { type: 'tool_result', tool_use_id: 'toolu_bad', content: 'build exploded', is_error: true },
         { type: 'tool_result', tool_use_id: 'toolu_ok', content: 'all green' },
         { type: 'tool_result', tool_use_id: 'toolu_mcp', content: 'results...' },
         { type: 'tool_result', tool_use_id: 'toolu_edit', content: 'ok' },
       ] } },
-      { type: 'assistant', message: { role: 'assistant', model: 'claude-opus-4', content: 'fixed the build' } },
+      { type: 'assistant', timestamp: ts(15), message: { role: 'assistant', model: 'claude-opus-4', content: 'fixed the build' } },
     ];
     await fs.writeFile(path.join(proj, 'enriched.jsonl'),
       lines.map(l => JSON.stringify(l)).join('\n') + '\n');
@@ -92,6 +93,19 @@ describe('v5 enrichment pipeline', () => {
     await request(app.app).get('/api/analytics/file-changes').expect(400);
     await request(app.app).get('/api/analytics/file-changes?path=x&limit=0').expect(400);
     await request(app.app).get('/api/analytics/file-changes?path=x&limit=abc').expect(400);
+  });
+
+  it('GET /api/conversations/:id/analytics reports real tool counts from the DB', async () => {
+    // The DB-backed list rows carry a zeroed toolUsage placeholder; the
+    // analytics route must read the tool_usage table instead of echoing it
+    // (the modal showed "Tool Calls 0" for every conversation).
+    const res = await request(app.app).get('/api/conversations/enriched/analytics').expect(200);
+    const analytics = res.body.analytics;
+    expect(analytics.toolCalls).toBe(4);
+    expect(analytics.toolUsage.totalCalls).toBe(4);
+    expect(analytics.toolUsage.uniqueTools).toBe(3);
+    expect(analytics.toolUsage.totalErrors).toBe(1);
+    expect(analytics.toolUsage.breakdown.Bash).toBe(2);
   });
 
   it('records src_line provenance on indexed messages', () => {

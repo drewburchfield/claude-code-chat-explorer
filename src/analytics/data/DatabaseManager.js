@@ -1232,6 +1232,28 @@ class DatabaseManager {
   }
 
   /**
+   * Tool usage for ONE conversation, shaped for the analytics modal.
+   * @param {string} conversationId
+   * @returns {{totalCalls: number, totalErrors: number, uniqueTools: number,
+   *            breakdown: Object, tools: Array}}
+   */
+  getConversationToolUsage(conversationId) {
+    const rows = this.db.prepare(`
+      SELECT tool_name, call_count, tool_kind, mcp_server, error_count
+      FROM tool_usage WHERE conversation_id = ?
+      ORDER BY call_count DESC
+    `).all(conversationId);
+    const breakdown = {};
+    let totalCalls = 0, totalErrors = 0;
+    for (const r of rows) {
+      breakdown[r.tool_name] = r.call_count;
+      totalCalls += r.call_count;
+      totalErrors += r.error_count || 0;
+    }
+    return { totalCalls, totalErrors, uniqueTools: rows.length, breakdown, tools: rows };
+  }
+
+  /**
    * Aggregate tool usage by kind (shell / file_edit / file_read / search /
    * task / web / mcp / other), canonical conversations only. MCP rows also
    * roll up per server.

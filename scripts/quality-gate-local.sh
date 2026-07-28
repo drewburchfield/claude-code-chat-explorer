@@ -45,6 +45,16 @@ calc_cpu_stats() {
 mkdir -p "$(dirname "$BENCH_FILE")"
 : > "$BENCH_FILE"
 
+# The bench file is a synthetic transcript inside the real corpus; without
+# cleanup it shows up in the UI as a project full of "quality gate payload"
+# messages. Remove it (and its directory, if the gate owns it) on every exit
+# so the watcher drops the conversation again.
+cleanup_bench() {
+  rm -f "$BENCH_FILE"
+  rmdir "$(dirname "$BENCH_FILE")" 2>/dev/null || true
+}
+trap cleanup_bench EXIT
+
 log "Building and starting container"
 docker compose up -d --build chat-explorer >/dev/null
 sleep 6

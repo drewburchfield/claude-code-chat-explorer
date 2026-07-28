@@ -242,6 +242,16 @@ class DatabaseBackend {
   }
 
   /**
+   * Tool usage for one conversation (analytics modal shape).
+   * @param {string} conversationId
+   * @returns {Object}
+   */
+  conversationToolUsage(conversationId) {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db.getConversationToolUsage(conversationId);
+  }
+
+  /**
    * Role/tool-granular search (message_fts). Same transformed shape as
    * searchConversationsWithSnippets, plus matchedRole/matchedSeq.
    * @param {string} query
