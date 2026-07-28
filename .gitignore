@@ -45,3 +45,53 @@ temp/
 # Internal planning artifacts (superpowers skill)
 /docs/superpowers/
 .clawpatch/
+
+# Local review/QA artifacts - generated scan output, never committed.
+# These contain findings and transcript excerpts from the local machine.
+security_report/
+dogfood-output/
+*-report.md
+sec_review_*.md
+
+# Private / work-in-progress notes. This repo is public: keep local thinking,
+# drafts, and anything with personal or client detail out of it.
+#
+# These are ANCHORED to the repo root on purpose. Unanchored (`notes/`) would
+# also swallow nested dirs like docs/research/, which IS tracked and published.
+/NOTES.md
+/TODO.local.md
+/scratch/
+/scratchpad/
+/notes/
+/private/
+/wip/
+/drafts/
+*.local.md
+*.private.md
+*.draft.md
+
+# Local agent/tool state
+.aider*
+.cursor/
+.windsurf/
+.codex/
+.opencode/
+.agy/
+.serena/
+.vibe/
+
+# Credentials and env - never commit real values (.mcp.json.example is the
+# tracked template; the real .mcp.json can hold tokens)
+.mcp.json
+*.pem
+*.key
+*.p12
+secrets/
+.secrets*
+.envrc
+
+# Local captures
+*.har
+screenshots/
+videos/
+*.webm
