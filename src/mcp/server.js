@@ -64,10 +64,34 @@ function buildServer({ search, db, transcriptRoot = null }) {
     transcriptRoot ||
     path.join(process.env.CLAUDE_HOME || path.join(os.homedir(), '.claude'), 'projects')
   );
+  // Resolve the root through symlinks once, so comparisons happen in real-path
+  // space. If the root itself doesn't exist yet, fall back to the lexical path.
+  let realAllowedRoot = allowedRoot;
+  try {
+    realAllowedRoot = fs.realpathSync(allowedRoot);
+  } catch {
+    /* root not present yet; lexical comparison is the best we can do */
+  }
+
   const isUnderRoot = (fp) => {
     if (!fp) return false;
-    const resolved = path.resolve(fp);
-    return resolved === allowedRoot || resolved.startsWith(allowedRoot + path.sep);
+
+    // path.resolve only normalizes lexically: it collapses ".." textually and
+    // never touches the filesystem, so a symlink sitting INSIDE the transcript
+    // root that points somewhere else entirely still looks like it is under the
+    // root. Resolve the real path so the containment check can't be defeated by
+    // planting a link in ~/.claude/projects.
+    let resolved;
+    try {
+      resolved = fs.realpathSync(path.resolve(fp));
+    } catch {
+      // Missing file: fall back to the lexical check. The caller still has to
+      // read it, which will fail on its own, and this keeps "file was deleted"
+      // reporting as a clean not-found rather than a permission-looking error.
+      resolved = path.resolve(fp);
+      return resolved === allowedRoot || resolved.startsWith(allowedRoot + path.sep);
+    }
+    return resolved === realAllowedRoot || resolved.startsWith(realAllowedRoot + path.sep);
   };
 
   // ---- Tool: search_conversations -----------------------------------------

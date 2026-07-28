@@ -43,9 +43,21 @@ class Indexer {
 
     try {
       // Get all JSONL files
-      const files = await this._findJsonlFiles(this.projectsDir);
+      let files = await this._findJsonlFiles(this.projectsDir);
       stats.filesScanned = files.length;
       console.log(chalk.gray(`Found ${files.length} JSONL files to process`));
+
+      // Newest first. On a large backlog the tool becomes useful in seconds
+      // instead of after the whole corpus, because the conversations a user
+      // actually wants are the ones they touched most recently. Unchanged
+      // files are skipped cheaply either way, so this only reorders real work.
+      // stat failures sort last rather than aborting the pass.
+      const mtimes = new Map();
+      await Promise.all(files.map(async (f) => {
+        try { mtimes.set(f, (await fs.stat(f)).mtime.getTime()); }
+        catch { mtimes.set(f, 0); }
+      }));
+      files = files.sort((a, b) => (mtimes.get(b) || 0) - (mtimes.get(a) || 0));
 
       // Get currently indexed files to detect deletions. Union file_index with
       // the conversations table so orphans are still detected when file_index
@@ -81,6 +93,18 @@ class Indexer {
             await this._indexFile(filePath, fileStats);
             stats.filesIndexed++;
 
+            // Hand the event loop back after every file we actually indexed.
+            // _indexFile is CPU-bound and synchronous inside (JSON.parse per
+            // line plus better-sqlite3 writes), so without this the HTTP server
+            // sharing this loop is starved: a request needs several loop turns
+            // to complete and each one queues behind another file. Measured on
+            // a ~4 GB store, serving the static index page took 27 s during a
+            // reindex. setImmediate runs pending I/O callbacks before the next
+            // file, which costs microseconds per file and keeps the UI usable.
+            // Only on the indexed path: skipped files are cheap and already
+            // yield via the awaited fs.stat above.
+            await new Promise(resolve => setImmediate(resolve));
+
           } catch (err) {
             console.warn(chalk.yellow(`Warning: Could not process ${path.basename(filePath)}: ${err.message}`));
             stats.errors++;
@@ -111,6 +135,16 @@ class Indexer {
       const duration = ((Date.now() - startTime) / 1000).toFixed(2);
       console.log(chalk.green(`✅ Indexing complete in ${duration}s`));
       console.log(chalk.gray(`   Indexed: ${stats.filesIndexed}, Skipped: ${stats.filesSkipped}, Removed: ${stats.filesRemoved}, Errors: ${stats.errors}`));
+
+      // Merge FTS segments after a pass that actually wrote something. Each
+      // re-index is a delete+reinsert and contentless_delete accumulates
+      // tombstones, so without this the segment count grows and queries drift
+      // slower over time. Skipped when nothing changed, so the common no-op
+      // pass stays a no-op.
+      if ((stats.filesIndexed > 0 || stats.filesRemoved > 0) &&
+          typeof this.db.optimizeSearchIndex === 'function') {
+        this.db.optimizeSearchIndex();
+      }
 
       return stats;
 

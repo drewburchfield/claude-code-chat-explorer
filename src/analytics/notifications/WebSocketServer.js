@@ -35,7 +35,11 @@ class WebSocketServer {
       this.wss = new WebSocket.Server({
         server: this.httpServer,
         path: this.options.path,
-        clientTracking: true
+        clientTracking: true,
+        // Reject cross-site WebSocket hijacking: a malicious page open in the
+        // user's browser must not be able to open a socket to this server and
+        // read pushed conversation data.
+        verifyClient: (info) => this.verifyOrigin(info)
       });
 
       this.setupEventHandlers();
@@ -46,6 +50,61 @@ class WebSocketServer {
     } catch (error) {
       console.error(chalk.red('❌ Failed to initialize WebSocket server:'), error);
       throw error;
+    }
+  }
+
+  /**
+   * Origin check for incoming WebSocket handshakes (ws `verifyClient`).
+   *
+   * This is CSRF protection, not authentication. A browser always sends an
+   * Origin header on a WebSocket handshake; a non-browser client (native ws,
+   * tests, curl) sends none and carries no ambient-authority risk, so those are
+   * allowed. This check deliberately does not try to stop a direct client.
+   *
+   * For browser clients we require the Origin's host to equal the request Host
+   * header. That is same host-and-port; scheme is not compared, because a
+   * Cloudflare tunnel terminates TLS and the origin server sees plain http. It
+   * covers localhost, 127.0.0.1, and a user-opted tunnel host without
+   * hard-coding any of them, and rejects a socket opened by a page served from
+   * another site. It does NOT defend against DNS rebinding, which produces a
+   * matching Origin/Host pair; that needs a Host allowlist, which belongs at a
+   * shared layer since the HTTP API is unauthenticated on the same interface.
+   *
+   * An explicit `options.allowedOrigins` list can whitelist additional origins.
+   *
+   * @param {{origin?: string, req: import('http').IncomingMessage}} info
+   * @returns {boolean} true to accept the handshake, false to reject (ws aborts
+   *   a rejected single-arity verifyClient handshake with HTTP 401)
+   */
+  verifyOrigin(info) {
+    const req = info && info.req;
+    const origin = (info && info.origin) || (req && req.headers && req.headers.origin);
+
+    // No Origin header => not a browser cross-site request; allow.
+    if (!origin) return true;
+
+    try {
+      // URL lowercases the host; the raw Host header is not normalized, so
+      // compare case-insensitively or a legitimate "Host: LOCALHOST:9876"
+      // handshake would be rejected.
+      const originHost = new URL(origin).host.toLowerCase();
+      const hostHeader = (req && req.headers && req.headers.host || '').toLowerCase();
+
+      if (hostHeader && originHost === hostHeader) return true;
+
+      if (Array.isArray(this.options.allowedOrigins) &&
+          this.options.allowedOrigins.includes(origin)) {
+        return true;
+      }
+
+      console.warn(chalk.yellow(
+        `🚫 Rejected cross-origin WebSocket handshake from ${origin} (host: ${hostHeader || 'unknown'})`
+      ));
+      return false;
+    } catch (error) {
+      // Unparseable Origin => reject rather than fail open.
+      console.warn(chalk.yellow(`🚫 Rejected WebSocket handshake with invalid Origin: ${origin}`));
+      return false;
     }
   }
 

@@ -86,6 +86,17 @@ class SearchService {
       });
     }
 
+    // A schema-bump rebuild leaves the index partially populated, so results
+    // are genuinely incomplete until it finishes. Report that as degraded on
+    // every surface (REST, MCP, UI) instead of returning quietly short results
+    // with degraded=false, which is the silent-degradation failure this project
+    // avoids elsewhere.
+    if (hasQuery && typeof this.db.hasPendingRebuild === 'function') {
+      try {
+        if (this.db.hasPendingRebuild()) degraded = true;
+      } catch { /* hasPendingRebuild already fails closed internally; unreachable */ }
+    }
+
     const filtered = this._applyFilters(candidates, {
       project, model, dateFrom, dateTo, subagentsOnly,
     });

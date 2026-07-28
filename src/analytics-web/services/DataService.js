@@ -116,7 +116,13 @@ class DataService {
    * @returns {Promise<Object>} Conversations data
    */
   async getConversations() {
-    return await this.cachedFetch('/api/data');
+    // '/api/data' is not a route this server serves, so it 404'd on every call.
+    // That silently killed the WebSocket fallback: startFallbackPolling() would
+    // poll, every request would throw, and the UI would sit frozen while still
+    // reporting "polling mode active". The real route is '/api/conversations'
+    // (the same one getConversationsPaginated already uses) and it returns the
+    // { conversations: [...] } shape callers destructure.
+    return await this.cachedFetch('/api/conversations');
   }
 
   /**
@@ -125,9 +131,16 @@ class DataService {
    * @param {number} limit - Number of conversations per page
    * @returns {Promise<Object>} Paginated conversations data
    */
-  async getConversationsPaginated(page = 0, limit = 10) {
+  /**
+   * @param {?string} before - Keyset cursor from a previous response's
+   *   nextCursor. The server uses keyset paging, not offsets: a `page` number
+   *   was never implemented there and is now rejected, because honouring
+   *   `limit` while ignoring `page` returned page 0 for every request.
+   */
+  async getConversationsPaginated(before = null, limit = 10) {
     const cacheDuration = this.realTimeEnabled ? 30000 : 5000;
-    return await this.cachedFetch(`/api/conversations?page=${page}&limit=${limit}`, {
+    const cursor = before ? `&before=${encodeURIComponent(before)}` : '';
+    return await this.cachedFetch(`/api/conversations?limit=${limit}${cursor}`, {
       cacheDuration
     });
   }
@@ -262,8 +275,11 @@ class DataService {
    * @param {Object} data - Fresh data from server
    */
   handleRealTimeDataRefresh(data) {
-    // Clear relevant cache entries
-    this.clearCacheEntry('/api/data');
+    // Clear relevant cache entries. Must match the keys cachedFetch actually
+    // stores, i.e. the real routes. Invalidating '/api/data' cleared nothing
+    // and left getConversations() serving a stale cached payload after a
+    // real-time refresh.
+    this.clearCacheEntry('/api/conversations');
     this.clearCacheEntry('/api/conversation-state');
     
     // Notify listeners

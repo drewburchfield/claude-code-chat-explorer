@@ -2261,6 +2261,10 @@
                             <span>Found <span class="search-results-count" id="searchResultsCount">0</span> conversations</span>
                             <button class="clear-filters-btn" id="clearFiltersBtn">Clear filters</button>
                         </div>
+                        <!-- Shown when the index is still being rebuilt or the
+                             search fell back: results are genuinely incomplete,
+                             and a short result list must not look authoritative. -->
+                        <div id="searchDegradedNotice" style="display: none; color: #f0b429; font-size: 12px;"></div>
                         <div id="appliedFilters" style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px;"></div>
                     </div>
                 </div>
@@ -3076,7 +3080,10 @@
 
                     // Fetch conversations and states simultaneously (like AgentsPage.js)
                     const [conversationsResponse, statesResponse] = await Promise.all([
-                        fetch(`/api/conversations?includeSubagents=${includeSubagents}`),
+                        // view=summary drops fields no list row renders (chiefly
+                        // filePath, which is ~19% of the payload and an absolute
+                        // host path). Roughly 1.23 MB -> ~0.3 MB.
+                        fetch(`/api/conversations?includeSubagents=${includeSubagents}&view=summary`),
                         fetch('/api/conversation-state') // Use singular like AgentsPage.js
                     ]);
                     
@@ -3194,7 +3201,7 @@
                             : '';
 
                         return `
-                            <div class="conversation-item${subagentClass}${stubClass}" data-conversation-id="${conv.id}" style="display: ${isExpanded ? 'flex' : 'none'}">
+                            <div class="conversation-item${subagentClass}${stubClass}" data-conversation-id="${this.escapeAttr(conv.id)}" style="display: ${isExpanded ? 'flex' : 'none'}">
                                 <div class="conversation-avatar conversation-avatar-small">
                                     ${conversationId.substring(0, 2).toUpperCase()}
                                 </div>
@@ -3213,10 +3220,13 @@
                         `;
                     }).join('');
 
+                    // Element-content vs attribute need different escaping: the
+                    // name is rendered as text AND used in data-project="...".
                     const escapedProjectName = this.escapeHtml(projectName);
+                    const projectNameAttr = this.escapeAttr(projectName);
                     return `
-                        <div class="project-group${todayClass}" data-project="${escapedProjectName}">
-                            <div class="project-header${todayClass}" data-project="${escapedProjectName}">
+                        <div class="project-group${todayClass}" data-project="${projectNameAttr}">
+                            <div class="project-header${todayClass}" data-project="${projectNameAttr}">
                                 <div class="project-avatar">
                                     ${this.escapeHtml(firstLetter)}
                                 </div>
@@ -3634,13 +3644,13 @@
                 const messageIndexAttr = messageIndex !== undefined ? ` data-message-index="${messageIndex}"` : '';
 
                 return `
-                    <div class="message message-${isUser ? 'user' : 'assistant'}${hasToolsClass}" data-message-id="${message.id || ''}"${messageIndexAttr}>
+                    <div class="message message-${isUser ? 'user' : 'assistant'}${hasToolsClass}" data-message-id="${this.escapeAttr(message.id || '')}"${messageIndexAttr}>
                         <div class="message-bubble">
                             <div class="message-content">
                                 ${this.formatMessageContent(message.content, message)}
                             </div>
                             <div class="message-meta">
-                                <span class="message-time" title="${fullTimestamp}">${timestamp}</span>
+                                <span class="message-time" title="${this.escapeAttr(fullTimestamp)}">${timestamp}</span>
                                 ${hasTools ? `<span class="tool-indicator">🔧 ${toolCount}</span>` : ''}
                                 ${message.usage && (message.usage.input_tokens > 0 || message.usage.output_tokens > 0) ? `
                                     <span class="token-indicator">
@@ -3701,22 +3711,43 @@
             // formatUnknownBlock was moved into BlockRenderers.js so the
             // dispatch logic (and its escape contract) is unit-testable.
 
+            /**
+             * Apply the inline markdown subset (fenced code, inline code, bold,
+             * italic, newline) to text that is ALREADY HTML-escaped.
+             *
+             * Contract: the input must have been through escapeHtml. This adds
+             * trusted tags on top of escaped text and escapes nothing itself.
+             * Backticks and asterisks survive escaping, so the markers still match.
+             */
+            applyInlineMarkdown(escapedText) {
+                return escapedText
+                    .replace(/```(\w+)?\n([\s\S]+?)\n```/g, '<pre><code class="$1">$2</code></pre>')
+                    .replace(/`([^`]+)`/g, '<code>$1</code>')
+                    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+                    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+                    .replace(/\n/g, '<br>');
+            }
+
             formatTextContent(text) {
                 if (!text) return '';
-                
-                // Check if text is very long (more than 10 lines or 800 characters)
+
+                // Measure and slice on the RAW text, then escape each piece.
+                // Escaping up front would make the length thresholds count entity
+                // characters (so "&"/"<"-heavy tool output collapses ~5x too
+                // early), and would let substring() cut an entity in half,
+                // rendering "&am" / "p;" across the fold.
                 const lines = text.split('\n');
                 const isLongText = lines.length > 10 || text.length > 800;
-                
+
                 let processedText = text;
                 let expandableContent = '';
-                
+
                 if (isLongText) {
                     // Take first 5 lines or 400 characters, whichever comes first
                     const previewLines = lines.slice(0, 5);
                     const previewText = previewLines.join('\n');
                     const remainingLines = lines.length - 5;
-                    
+
                     if (previewText.length > 400) {
                         processedText = text.substring(0, 400) + '...';
                         expandableContent = text.substring(400);
@@ -3724,26 +3755,14 @@
                         processedText = previewText;
                         expandableContent = lines.slice(5).join('\n');
                     }
-                    
-                    // Create unique ID for this message
-                    const messageId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-                    
-                    // Format the preview text
-                    const formattedPreview = processedText
-                        .replace(/```(\w+)?\n([\s\S]+?)\n```/g, '<pre><code class="$1">$2</code></pre>')
-                        .replace(/`([^`]+)`/g, '<code>$1</code>')
-                        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-                        .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-                        .replace(/\n/g, '<br>');
-                    
-                    // Format the hidden content
-                    const formattedHidden = expandableContent
-                        .replace(/```(\w+)?\n([\s\S]+?)\n```/g, '<pre><code class="$1">$2</code></pre>')
-                        .replace(/`([^`]+)`/g, '<code>$1</code>')
-                        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-                        .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-                        .replace(/\n/g, '<br>');
-                    
+
+                    // Escape each half AFTER slicing. Transcript text is untrusted
+                    // (tool output, pasted content, imported sessions) and this
+                    // string is later assigned via innerHTML, so raw markup like
+                    // <img src=x onerror=...> would otherwise execute.
+                    const formattedPreview = this.applyInlineMarkdown(this.escapeHtml(processedText));
+                    const formattedHidden = this.applyInlineMarkdown(this.escapeHtml(expandableContent));
+
                     return `
                         <div class="expandable-message">
                             <div class="message-preview">${formattedPreview}</div>
@@ -3761,12 +3780,7 @@
                 }
                 
                 // Basic markdown-like formatting for normal length messages
-                return text
-                    .replace(/```(\w+)?\n([\s\S]+?)\n```/g, '<pre><code class="$1">$2</code></pre>')
-                    .replace(/`([^`]+)`/g, '<code>$1</code>')
-                    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-                    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-                    .replace(/\n/g, '<br>');
+                return this.applyInlineMarkdown(this.escapeHtml(text));
             }
 
             formatToolCall(toolCall) {
@@ -3826,7 +3840,7 @@
                             }
                         ">
                             <span class="tool-bullet">⏺</span>
-                            <span class="tool-name">${toolName}</span>${toolSummary ? `<span class="tool-summary-text">(${toolSummary})</span>` : ''}
+                            <span class="tool-name">${this.escapeHtml(toolName)}</span>${toolSummary ? `<span class="tool-summary-text">(${this.escapeHtml(toolSummary)})</span>` : ''}
                         </div>
                         <div class="tool-expand-note" onclick="this.parentNode.querySelector('.tool-summary').click();">
                             <span class="tool-branch">⎿</span>
@@ -3994,18 +4008,13 @@
                 }
             }
 
-            /**
-             * Escape HTML characters to prevent double-encoding issues
-             * @param {string} text - Text to escape
-             * @returns {string} Escaped text
-             */
-            escapeHtml(text) {
-                if (typeof text !== 'string') return text;
-                
-                const div = document.createElement('div');
-                div.textContent = text;
-                return div.innerHTML;
-            }
+            // NOTE: escapeHtml is defined once, further down in this class. A
+            // second definition used to live here; duplicate class methods are
+            // legal JS and the LAST one silently wins, so this copy was dead
+            // code, and dangerously so, because it returned non-string input
+            // unescaped (`if (typeof text !== 'string') return text`). Had the
+            // other definition ever been removed, that fail-open branch would
+            // have become the live escaper. Keep exactly one.
 
 
 
@@ -4457,6 +4466,22 @@
                     this.renderAppliedFilters(filters, appliedFiltersContainer);
                     searchResultsInfo.classList.add('active');
 
+                    // Surface incomplete results. The API has always reported
+                    // searchDegraded/indexState; nothing rendered them, so a
+                    // partially rebuilt index looked like a complete answer.
+                    const degradedNotice = document.getElementById('searchDegradedNotice');
+                    if (degradedNotice) {
+                        const rebuilding = data.indexState && data.indexState !== 'idle';
+                        if (data.searchDegraded || rebuilding) {
+                            degradedNotice.textContent = rebuilding
+                                ? '⚠️ Still indexing - these results are incomplete.'
+                                : '⚠️ Search is degraded - these results may be incomplete.';
+                            degradedNotice.style.display = 'block';
+                        } else {
+                            degradedNotice.style.display = 'none';
+                        }
+                    }
+
                     // Close the search panel
                     this.closeAdvancedSearch();
 
@@ -4636,9 +4661,9 @@
                     const isSelected = dir === currentValue;
 
                     return `
-                        <div class="folder-item ${isSelected ? 'selected' : ''}" data-path="${this.escapeHtml(dir)}">
+                        <div class="folder-item ${isSelected ? 'selected' : ''}" data-path="${this.escapeAttr(dir)}">
                             <span class="folder-icon">📁</span>
-                            <span class="folder-path" title="${this.escapeHtml(dir)}">${this.escapeHtml(dir)}</span>
+                            <span class="folder-path" title="${this.escapeAttr(dir)}">${this.escapeHtml(dir)}</span>
                             <span class="folder-count">${count}</span>
                         </div>
                     `;
@@ -4675,10 +4700,55 @@
                 this.renderFolderBrowserList(filtered);
             }
 
+            /**
+             * Escape transcript text for interpolation into an innerHTML string.
+             *
+             * This is the single escaper for this class (see the note where a
+             * duplicate used to live). It is deliberately total: null/undefined
+             * become '' and any other non-string is coerced, so a malformed or
+             * hand-crafted transcript record can never slip an unescaped value
+             * through by being an array or object.
+             *
+             * Scope: neutralizes & < > via text-node serialization, which makes
+             * it safe for ELEMENT CONTENT. It does not escape quotes, so it is
+             * not sufficient for attribute values on its own.
+             *
+             * @param {*} text - Value to escape
+             * @returns {string} Escaped text, always a string
+             */
             escapeHtml(text) {
+                if (text === null || text === undefined) return '';
                 const div = document.createElement('div');
-                div.textContent = text;
+                div.textContent = typeof text === 'string' ? text : String(text);
                 return div.innerHTML;
+            }
+
+            /**
+             * Escape a value for interpolation into a quoted HTML ATTRIBUTE.
+             *
+             * escapeHtml() is not sufficient here. It serializes through a text
+             * node, which neutralizes & < > but leaves " and ' intact. That is fine for
+             * element content, but in `attr="${value}"` a single double-quote
+             * closes the attribute and everything after it is parsed as more
+             * attributes. A transcript carrying
+             *   "id": "x\" onmouseover=\"alert(1)"
+             * would inject an event handler on the message element.
+             *
+             * Transcript ids/uuids flow straight from the JSONL
+             * (ConversationAnalyzer: `item.message.id || item.uuid`), so they are
+             * attacker-controlled for a crafted or imported session.
+             *
+             * @param {*} value - Value to escape
+             * @returns {string} Escaped text, always a string, safe in quoted attributes
+             */
+            escapeAttr(value) {
+                if (value === null || value === undefined) return '';
+                return String(value)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
             }
 
             // In-Conversation Search Methods
@@ -4887,26 +4957,65 @@
                 messageElements.forEach(element => {
                     const text = element.textContent;
                     if (text.toLowerCase().includes(searchTerm)) {
-                        const highlightedHTML = this.highlightText(element.innerHTML, query);
-                        element.innerHTML = highlightedHTML;
+                        this.highlightTextNodes(element, query);
                     }
                 });
             }
 
-            highlightText(html, searchTerm) {
-                const text = document.createElement('div');
-                text.innerHTML = html;
-                const textContent = text.textContent;
+            /**
+             * Wrap every occurrence of `query` inside `root`'s text nodes in a
+             * highlight span, mutating the live DOM.
+             *
+             * This must never round-trip through innerHTML. The previous version
+             * read element.innerHTML, pulled `.textContent` off a scratch div,
+             * which DECODES entities, turning an escaped "&lt;img onerror=...&gt;"
+             * back into live markup, and assigned the result straight back to
+             * innerHTML, resurrecting the very stored XSS that formatTextContent
+             * escapes. Walking text nodes never re-parses transcript text as HTML.
+             *
+             * It also fixes a UX bug the old version had: flattening innerHTML to
+             * text destroyed the message's own trusted markup (<br>, <pre>, <code>,
+             * tool-call blocks) on every search. Text-node walking leaves it intact.
+             */
+            highlightTextNodes(root, query) {
+                if (!query) return;
+                const queryLower = query.toLowerCase();
 
-                if (!textContent.toLowerCase().includes(searchTerm.toLowerCase())) {
-                    return html;
+                // Collect first: replacing nodes while walking invalidates the walker.
+                const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+                const targets = [];
+                let node;
+                while ((node = walker.nextNode())) {
+                    if (node.nodeValue && node.nodeValue.toLowerCase().includes(queryLower)) {
+                        targets.push(node);
+                    }
                 }
 
-                // Use regex to find all occurrences (case-insensitive)
-                const regex = new RegExp(`(${this.escapeRegex(searchTerm)})`, 'gi');
-                const newHTML = textContent.replace(regex, '<span class="message-highlight">$1</span>');
+                for (const textNode of targets) {
+                    const text = textNode.nodeValue;
+                    const lower = text.toLowerCase();
+                    const fragment = document.createDocumentFragment();
+                    let lastIndex = 0;
+                    let index;
 
-                return newHTML;
+                    while ((index = lower.indexOf(queryLower, lastIndex)) !== -1) {
+                        if (index > lastIndex) {
+                            fragment.appendChild(document.createTextNode(text.slice(lastIndex, index)));
+                        }
+                        const span = document.createElement('span');
+                        span.className = 'message-highlight';
+                        // textContent, never innerHTML: the matched run is transcript text.
+                        span.textContent = text.slice(index, index + query.length);
+                        fragment.appendChild(span);
+                        lastIndex = index + query.length;
+                    }
+
+                    if (lastIndex < text.length) {
+                        fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+                    }
+
+                    textNode.parentNode.replaceChild(fragment, textNode);
+                }
             }
 
             highlightCurrentMatch(messageIndex) {
@@ -5976,7 +6085,7 @@
                             font-family: monospace;
                             color: var(--text-primary);
                         ">
-                            <span>${usage.model}</span>
+                            <span>${this.escapeHtml(usage.model)}</span>
                             <span style="
                                 padding: 2px 6px;
                                 background: rgba(139, 92, 246, 0.3);
@@ -6004,7 +6113,7 @@
                         return `
                             <div style="margin-bottom: 10px; padding: 8px; background: rgba(255,255,255,0.03); border-radius: 6px;">
                                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-                                    <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">${tool}</span>
+                                    <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">${this.escapeHtml(tool)}</span>
                                     <span style="font-size: 12px; color: var(--text-secondary);">${count} calls (${percentage}%)</span>
                                 </div>
                                 <div style="height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;">
@@ -6083,7 +6192,7 @@
                                     font-size: 12px;
                                     color: var(--text-primary);
                                 ">
-                                    <span>${agent.type}</span>
+                                    <span>${this.escapeHtml(agent.type)}</span>
                                     <span style="color: var(--text-secondary); font-size: 11px;">×${agent.count}</span>
                                 </span>
                             `;
@@ -6110,7 +6219,7 @@
                                     font-family: monospace;
                                     color: var(--text-primary);
                                 ">
-                                    <span>${cmd.name}</span>
+                                    <span>${this.escapeHtml(cmd.name)}</span>
                                     <span style="color: var(--text-secondary); font-size: 11px;">×${cmd.count}</span>
                                 </span>
                             `;
@@ -6136,7 +6245,7 @@
                                     font-size: 12px;
                                     color: var(--text-primary);
                                 ">
-                                    <span>${skill.name}</span>
+                                    <span>${this.escapeHtml(skill.name)}</span>
                                     <span style="color: var(--text-secondary); font-size: 11px;">×${skill.count}</span>
                                 </span>
                             `;

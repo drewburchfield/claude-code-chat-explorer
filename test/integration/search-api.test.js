@@ -112,4 +112,110 @@ describe('SearchService REST surface', () => {
     const ids = res.body.results.map(r => r.id);
     expect(ids).toEqual(['b']);
   });
+
+  it('matches terms spread ACROSS messages, and still returns a preview', async () => {
+    // Session 'a' is: user "the quick brown fox", assistant "ok". Neither term
+    // pair lives in one message, so this only matches via the conversation-level
+    // index. Collapsing search onto message_fts alone would silently drop it.
+    const res = await request(app.app).post('/api/search')
+      .send({ contentSearch: 'fox ok' }).expect(200);
+    const hit = res.body.results.find(r => r.id === 'a');
+    expect(hit).toBeTruthy();
+    // No single message contains both terms, so the per-message snippet query
+    // finds nothing; the row must still carry a preview rather than render blank.
+    expect(hit.snippet).toBeTruthy();
+  });
+
+  describe('GET /api/conversations projection and paging', () => {
+    it('returns the full record by default (unchanged for existing consumers)', async () => {
+      const res = await request(app.app).get('/api/conversations').expect(200);
+      expect(res.body.conversations.length).toBeGreaterThan(0);
+      expect(res.body.conversations[0]).toHaveProperty('filePath');
+    });
+
+    it('view=summary omits filePath and other fields no list row renders', async () => {
+      const res = await request(app.app).get('/api/conversations?view=summary').expect(200);
+      const row = res.body.conversations[0];
+      // filePath is the largest single field and an absolute host path; it must
+      // not reach the browser in the summary view.
+      expect(row).not.toHaveProperty('filePath');
+      expect(row).not.toHaveProperty('toolUsage');
+      // ...but everything a row actually renders is still present.
+      expect(row).toHaveProperty('id');
+      expect(row).toHaveProperty('project');
+      expect(row).toHaveProperty('lastModified');
+      expect(row).toHaveProperty('messageCount');
+    });
+
+    it('limit caps the page and returns a cursor; before= walks without overlap', async () => {
+      const first = await request(app.app).get('/api/conversations?limit=1').expect(200);
+      expect(first.body.conversations).toHaveLength(1);
+      expect(first.body.nextCursor).toBeTruthy();
+
+      const second = await request(app.app)
+        .get(`/api/conversations?limit=1&before=${encodeURIComponent(first.body.nextCursor)}`)
+        .expect(200);
+
+      // Keyset, not OFFSET: the second page must not repeat the first row.
+      const firstId = first.body.conversations[0].id;
+      expect(second.body.conversations.map(c => c.id)).not.toContain(firstId);
+    });
+
+    it('omits nextCursor when the whole set fits in the page', async () => {
+      const res = await request(app.app).get('/api/conversations?limit=1000').expect(200);
+      expect(res.body.nextCursor).toBeNull();
+    });
+
+    it('rejects `page`, which was never implemented, instead of ignoring it', async () => {
+      // Honouring `limit` while silently dropping `page` returned page 0 every
+      // time, under a per-page cache key.
+      await request(app.app).get('/api/conversations?page=2&limit=5').expect(400);
+    });
+
+    it('rejects paging combined with includeSubagents', async () => {
+      // Grouping interleaves parents with children; the (lastModified, id)
+      // order paging needs scatters them, so a page could hold a parent stub
+      // whose children are on another page.
+      await request(app.app).get('/api/conversations?limit=5&includeSubagents=true').expect(400);
+    });
+
+    it('round-trips a cursor whose id contains underscores', async () => {
+      // Subagent ids are built as `<parentId>_agent-<id>`, so lastIndexOf('_')
+      // parsed a timestamp of "<ts>_<parentId>", which is NaN, and paging 400'd
+      // on exactly those rows. Split on the FIRST separator instead.
+      const res = await request(app.app)
+        .get('/api/conversations?limit=1&before=' + encodeURIComponent('9999999999999_abc_agent-1'))
+        .expect(200);
+      expect(Array.isArray(res.body.conversations)).toBe(true);
+    });
+
+    it('rejects a non-positive or non-numeric limit', async () => {
+      await request(app.app).get('/api/conversations?limit=0').expect(400);
+      await request(app.app).get('/api/conversations?limit=-3').expect(400);
+      await request(app.app).get('/api/conversations?limit=garbage').expect(400);
+    });
+
+    it('rejects a malformed cursor instead of silently returning everything', async () => {
+      // Without the guard a bad cursor parsed to NaN, every comparison was
+      // false, and the caller got the whole list back looking like a page.
+      await request(app.app).get('/api/conversations?before=garbage').expect(400);
+    });
+
+    it('walks the entire set without skipping or repeating a row', async () => {
+      const all = await request(app.app).get('/api/conversations').expect(200);
+      const expected = all.body.conversations.length;
+
+      const seen = [];
+      let cursor = null;
+      for (let i = 0; i < 20; i++) {
+        const url = `/api/conversations?limit=1${cursor ? `&before=${encodeURIComponent(cursor)}` : ''}`;
+        const page = await request(app.app).get(url).expect(200);
+        seen.push(...page.body.conversations.map(c => c.id));
+        cursor = page.body.nextCursor;
+        if (!cursor) break;
+      }
+      expect(seen.length).toBe(expected);
+      expect(new Set(seen).size).toBe(expected); // no repeats
+    });
+  });
 });
