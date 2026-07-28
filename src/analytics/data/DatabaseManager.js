@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs-extra');
 const chalk = require('chalk');
 const { toolKind } = require('../core/ToolTaxonomy');
+const { classifyAgentWorktree } = require('../core/WorktreeClassifier');
 
 /**
  * Shape of the search index. Bump when the extracted content or the search
@@ -114,7 +115,8 @@ class DatabaseManager {
           tokens_input INTEGER DEFAULT 0,
           tokens_output INTEGER DEFAULT 0,
           primary_model TEXT,
-          indexed_at INTEGER NOT NULL
+          indexed_at INTEGER NOT NULL,
+          is_worktree_agent INTEGER DEFAULT 0
         )
       `);
 
@@ -414,6 +416,7 @@ class DatabaseManager {
       addMissing('tool_usage', 'tool_kind', 'TEXT');
       addMissing('tool_usage', 'mcp_server', 'TEXT');
       addMissing('tool_usage', 'error_count', 'INTEGER DEFAULT 0');
+      addMissing('conversations', 'is_worktree_agent', 'INTEGER DEFAULT 0');
       // messages may not exist yet on a pre-v4 database; _migrateFtsContentVersion
       // rebuilds it (with src_line) in that case.
       const hasMessages = this.db.prepare(
@@ -658,8 +661,8 @@ class DatabaseManager {
       INSERT OR REPLACE INTO conversations (
         id, file_path, filename, project, message_count, file_size,
         last_modified, created, tokens_total, tokens_input, tokens_output,
-        primary_model, indexed_at, is_subagent, parent_id, cwd
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        primary_model, indexed_at, is_subagent, parent_id, cwd, is_worktree_agent
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     // Indexed delete on a real table (see _createSchema for why this replaced
@@ -739,7 +742,8 @@ class DatabaseManager {
         now,
         conversation.isSubagent ? 1 : 0,
         conversation.parentId || null,
-        conversation.cwd || null
+        conversation.cwd || null,
+        conversation.isWorktreeAgent ? 1 : 0
       );
 
       // Replace this conversation's messages. The delete uses
@@ -849,7 +853,7 @@ class DatabaseManager {
       SELECT
         id, file_path, filename, project, message_count, file_size,
         last_modified, created, tokens_total, tokens_input, tokens_output,
-        primary_model, indexed_at, is_subagent, parent_id
+        primary_model, indexed_at, is_subagent, parent_id, is_worktree_agent
       FROM conversations
     `;
 
@@ -903,7 +907,7 @@ class DatabaseManager {
         SELECT
           c.id, c.file_path, c.filename, c.project, c.message_count, c.file_size,
           c.last_modified, c.created, c.tokens_total, c.tokens_input, c.tokens_output,
-          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id,
+          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id, c.is_worktree_agent,
           bm25(conversation_fts) as relevance
         FROM conversation_fts
         JOIN conv_seq cs ON cs.conv_no = conversation_fts.rowid
@@ -960,7 +964,7 @@ class DatabaseManager {
         SELECT
           c.id, c.file_path, c.filename, c.project, c.message_count, c.file_size,
           c.last_modified, c.created, c.tokens_total, c.tokens_input, c.tokens_output,
-          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id,
+          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id, c.is_worktree_agent,
           bm25(conversation_fts) as relevance
         FROM conversation_fts
         JOIN conv_seq cs ON cs.conv_no = conversation_fts.rowid
@@ -1098,7 +1102,7 @@ class DatabaseManager {
         SELECT
           c.id, c.file_path, c.filename, c.project, c.message_count, c.file_size,
           c.last_modified, c.created, c.tokens_total, c.tokens_input, c.tokens_output,
-          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id,
+          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id, c.is_worktree_agent,
           bm25(message_fts) AS relevance,
           snippet(message_fts, 4, '{{MATCH}}', '{{/MATCH}}', '...', 20) AS snippet,
           message_fts.role AS matched_role, message_fts.seq AS matched_seq
@@ -1442,6 +1446,7 @@ class DatabaseManager {
       },
       indexedAt: new Date(row.indexed_at),
       isSubagent: row.is_subagent === 1,
+      isWorktreeAgent: row.is_worktree_agent === 1,
       parentId: row.parent_id || null
     };
   }
@@ -1583,7 +1588,11 @@ class DatabaseManager {
           }
         }
 
-        const canonicalName = path.basename(rootCwd);
+        // Agent-worktree folders must resolve to the OWNING project, not the
+        // worktree directory's own basename, or the fake project name this
+        // classification removes would be reinstated here.
+        const worktree = classifyAgentWorktree(rootCwd);
+        const canonicalName = worktree?.owningProject || path.basename(rootCwd);
         if (!canonicalName) continue;
 
         // Update all conversations in this folder to use the canonical name

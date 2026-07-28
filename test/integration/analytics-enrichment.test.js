@@ -44,6 +44,26 @@ describe('v5 enrichment pipeline', () => {
     await fs.writeFile(path.join(proj, 'enriched.jsonl'),
       lines.map(l => JSON.stringify(l)).join('\n') + '\n');
 
+    // An agent that ran in an isolated worktree of the SAME repo. Claude Code
+    // keys the transcript directory off the cwd, so this lands in its own
+    // top-level folder and carries no parent linkage - the cwd is the only
+    // signal that it is not a project of its own.
+    const wtProj = path.join(claudeDir, 'projects', '-work-demo--worktrees-agent-fix-1');
+    await fs.ensureDir(wtProj);
+    const wtCwd = '/work/demo/.worktrees/agent-fix-1';
+    const wtLines = [
+      { type: 'user', timestamp: ts(20), message: { role: 'user', content: 'run the isolated fix' }, cwd: wtCwd },
+      { type: 'assistant', timestamp: ts(25), message: { role: 'assistant', model: 'claude-opus-4', content: [
+        { type: 'tool_use', id: 'toolu_wt', name: 'WorktreeOnlyTool', input: { note: 'unique to the worktree session' } },
+      ] } },
+      { type: 'user', timestamp: ts(30), message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'toolu_wt', content: 'done' },
+      ] } },
+      { type: 'assistant', timestamp: ts(35), message: { role: 'assistant', model: 'claude-opus-4', content: 'isolated fix applied' } },
+    ];
+    await fs.writeFile(path.join(wtProj, 'wt-agent.jsonl'),
+      wtLines.map(l => JSON.stringify(l)).join('\n') + '\n');
+
     process.env.CLAUDE_DB_PATH = path.join(tempHome, 'conversations.db');
     app = new ChatsMobile({ port: 0, claudeDir, verbose: false });
     await app.initialize();
@@ -106,6 +126,44 @@ describe('v5 enrichment pipeline', () => {
     expect(analytics.toolUsage.uniqueTools).toBe(3);
     expect(analytics.toolUsage.totalErrors).toBe(1);
     expect(analytics.toolUsage.breakdown.Bash).toBe(2);
+  });
+
+  describe('agent-worktree session classification', () => {
+    it('hides the worktree session from the default conversation list', async () => {
+      const res = await request(app.app).get('/api/conversations').expect(200);
+      const ids = res.body.conversations.map(c => c.id);
+      expect(ids).toContain('enriched');
+      expect(ids).not.toContain('wt-agent');
+    });
+
+    it('surfaces it under the owning project when subagents are included', async () => {
+      const res = await request(app.app)
+        .get('/api/conversations?includeSubagents=true').expect(200);
+      const wt = res.body.conversations.find(c => c.id === 'wt-agent');
+
+      expect(wt).toBeTruthy();
+      expect(wt.isSubagent).toBe(true);
+      expect(wt.isWorktreeAgent).toBe(true);
+      // Attributed to the repo that owns the worktree, not to the worktree
+      // directory's own basename ("agent-fix-1"), which would be a fake project.
+      expect(wt.project).toBe('demo');
+      // Nothing in the transcript records which session spawned it.
+      expect(wt.parentId).toBeNull();
+
+      // The ordinary session is untouched by the classification.
+      const main = res.body.conversations.find(c => c.id === 'enriched');
+      expect(main.isSubagent).toBe(false);
+      expect(main.isWorktreeAgent).toBe(false);
+    });
+
+    it('keeps the worktree session out of the tool rollups', async () => {
+      const res = await request(app.app).get('/api/analytics/tools').expect(200);
+      const names = res.body.tools.map(t => t.tool_name);
+      // The canonical rollup filter excludes subagents, and a worktree session
+      // is one; its calls would otherwise double-count the parent's work.
+      expect(names).not.toContain('WorktreeOnlyTool');
+      expect(names).toContain('Bash');
+    });
   });
 
   it('records src_line provenance on indexed messages', () => {

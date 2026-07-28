@@ -395,6 +395,9 @@ class DatabaseBackend {
       },
       // Subagent hierarchy fields
       isSubagent: conv.isSubagent || false,
+      // Agent-worktree sessions: subagent-like, but with no parent session
+      // recorded in the transcript. Consumers use this to label them.
+      isWorktreeAgent: conv.isWorktreeAgent || false,
       parentId: conv.parentId || null
     };
   }

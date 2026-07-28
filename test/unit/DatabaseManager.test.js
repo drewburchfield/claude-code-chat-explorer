@@ -169,6 +169,31 @@ describe('DatabaseManager', () => {
       expect(readTool.total_calls).toBe(5);
     });
 
+    it('round-trips the agent-worktree flag', () => {
+      // A worktree agent is subagent-like but parentless, so is_worktree_agent
+      // is the only thing that distinguishes it from a spawned subagent.
+      const conv = createMockConversation({
+        id: 'worktree-agent-001',
+        project: 'demo',
+        cwd: '/work/demo/.worktrees/agent-fix-1',
+        isSubagent: true,
+        isWorktreeAgent: true,
+        parentId: null,
+      });
+      db.upsertConversation(conv, 'worktree agent content');
+
+      expect(db.getConversation('worktree-agent-001').isWorktreeAgent).toBe(true);
+
+      const listed = db.getConversations({ includeSubagents: true })
+        .find(c => c.id === 'worktree-agent-001');
+      expect(listed.isWorktreeAgent).toBe(true);
+      expect(listed.parentId).toBeNull();
+
+      // An ordinary conversation reports false, not undefined.
+      db.upsertConversation(createMockConversation({ id: 'plain-001' }), 'plain content');
+      expect(db.getConversation('plain-001').isWorktreeAgent).toBe(false);
+    });
+
     it('handles subagent conversations', () => {
       const conv = createMockConversation({
         id: 'parent-001_agent-1',

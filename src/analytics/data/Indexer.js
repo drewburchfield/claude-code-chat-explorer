@@ -3,6 +3,7 @@ const fs = require('fs-extra');
 const path = require('path');
 const readline = require('readline');
 const { fileChangeFromTool } = require('../core/ToolTaxonomy');
+const { classifyAgentWorktree } = require('../core/WorktreeClassifier');
 
 // Per-block safety ceiling for FTS content. We no longer truncate at 2000
 // chars (that lost recall vs the on-disk text); the only cap is this generous
@@ -209,6 +210,19 @@ class Indexer {
       project = this._extractProjectFromPath(filePath);
     }
 
+    // Agent worktree sessions (Agent tool isolation, EnterWorktree, Cyrus)
+    // get their own top-level transcript directory keyed by the worktree cwd
+    // and carry no parent linkage, so each one masqueraded as a fake project
+    // in the main list. Classify by cwd: mark as a subagent (every default
+    // list/search/rollup already excludes those) and attribute the session
+    // to the owning repo. parentId stays null: the parent session id is
+    // genuinely not recorded anywhere in the child transcript.
+    const worktree = classifyAgentWorktree(parseResult.cwd);
+    const isWorktreeAgent = !!worktree;
+    if (worktree?.owningProject) {
+      project = worktree.owningProject;
+    }
+
     // Build conversation object
     const conversation = {
       id,
@@ -224,7 +238,8 @@ class Indexer {
       modelInfo: parseResult.modelInfo,
       toolUsage: parseResult.toolUsage,
       fileChanges: parseResult.fileChanges,
-      isSubagent,
+      isSubagent: isSubagent || isWorktreeAgent,
+      isWorktreeAgent,
       parentId
     };
 
