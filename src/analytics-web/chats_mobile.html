@@ -2782,6 +2782,23 @@
     <script src="components/WatcherHealth.js"></script>
 
     <script>
+        /**
+         * The one HTML-escaping implementation for ELEMENT CONTENT. The
+         * ChatsMobileApp method delegates here, and standalone functions
+         * (the analytics modal renders outside the class, where `this` is
+         * not the app) call it directly. Neutralizes & < > via text-node
+         * serialization; NOT sufficient for attribute values (no quote
+         * escaping), use the class's escapeAttr for those.
+         * @param {*} text - Value to escape
+         * @returns {string} Escaped text, always a string
+         */
+        function escapeHtmlText(text) {
+            if (text === null || text === undefined) return '';
+            const div = document.createElement('div');
+            div.textContent = typeof text === 'string' ? text : String(text);
+            return div.innerHTML;
+        }
+
         class ChatsMobileApp {
             constructor() {
                 this.conversations = [];
@@ -4717,10 +4734,7 @@
              * @returns {string} Escaped text, always a string
              */
             escapeHtml(text) {
-                if (text === null || text === undefined) return '';
-                const div = document.createElement('div');
-                div.textContent = typeof text === 'string' ? text : String(text);
-                return div.innerHTML;
+                return escapeHtmlText(text);
             }
 
             /**
@@ -6085,7 +6099,7 @@
                             font-family: monospace;
                             color: var(--text-primary);
                         ">
-                            <span>${this.escapeHtml(usage.model)}</span>
+                            <span>${escapeHtmlText(usage.model)}</span>
                             <span style="
                                 padding: 2px 6px;
                                 background: rgba(139, 92, 246, 0.3);
@@ -6113,7 +6127,7 @@
                         return `
                             <div style="margin-bottom: 10px; padding: 8px; background: rgba(255,255,255,0.03); border-radius: 6px;">
                                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-                                    <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">${this.escapeHtml(tool)}</span>
+                                    <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">${escapeHtmlText(tool)}</span>
                                     <span style="font-size: 12px; color: var(--text-secondary);">${count} calls (${percentage}%)</span>
                                 </div>
                                 <div style="height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;">
@@ -6192,7 +6206,7 @@
                                     font-size: 12px;
                                     color: var(--text-primary);
                                 ">
-                                    <span>${this.escapeHtml(agent.type)}</span>
+                                    <span>${escapeHtmlText(agent.type)}</span>
                                     <span style="color: var(--text-secondary); font-size: 11px;">×${agent.count}</span>
                                 </span>
                             `;
@@ -6219,7 +6233,7 @@
                                     font-family: monospace;
                                     color: var(--text-primary);
                                 ">
-                                    <span>${this.escapeHtml(cmd.name)}</span>
+                                    <span>${escapeHtmlText(cmd.name)}</span>
                                     <span style="color: var(--text-secondary); font-size: 11px;">×${cmd.count}</span>
                                 </span>
                             `;
@@ -6245,7 +6259,7 @@
                                     font-size: 12px;
                                     color: var(--text-primary);
                                 ">
-                                    <span>${this.escapeHtml(skill.name)}</span>
+                                    <span>${escapeHtmlText(skill.name)}</span>
                                     <span style="color: var(--text-secondary); font-size: 11px;">×${skill.count}</span>
                                 </span>
                             `;
