@@ -187,6 +187,16 @@ The container runs hardened:
 
 Your Claude data is mounted read-only.
 
+### Remote access (optional): Tailscale Serve
+
+The app itself has no authentication, so it must never be exposed to the public internet. If you want to reach it from your other devices, put it on your tailnet with [Tailscale Serve](https://tailscale.com/kb/1312/serve):
+
+```bash
+tailscale serve --bg 9876
+```
+
+Only devices signed in to your tailnet can reach it, transport is WireGuard-encrypted, and Tailscale terminates TLS for you (the app's WebSocket origin check handles that proxy setup out of the box). Do NOT use `tailscale funnel`, which exposes the port to the public internet and defeats the point.
+
 ## Troubleshooting
 
 ### No conversations showing?

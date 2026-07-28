@@ -31,8 +31,10 @@ describe('WebSocketServer.verifyOrigin', () => {
     expect(verify(info('http://127.0.0.1:9876', '127.0.0.1:9876'))).toBe(true);
   });
 
-  it('accepts a Cloudflare-tunnel handshake without hard-coding the host', () => {
-    expect(verify(info('https://abc-def.trycloudflare.com', 'abc-def.trycloudflare.com'))).toBe(true);
+  it('accepts a TLS-terminating reverse-proxy handshake without hard-coding the host', () => {
+    // Scheme is not compared: the proxy terminates TLS and the origin server
+    // sees plain http, but Origin host and request Host still match.
+    expect(verify(info('https://app.internal.example', 'app.internal.example'))).toBe(true);
   });
 
   it('accepts a non-browser client that sends no Origin header', () => {

@@ -2,7 +2,6 @@ const chalk = require('chalk');
 const fs = require('fs-extra');
 const path = require('path');
 const os = require('os');
-const QRCode = require('qrcode');
 
 // Hosts permitted as session-clone sources. Anything else is rejected before
 // we touch the network. Keeping this list short and explicit prevents the
@@ -479,38 +478,6 @@ class SessionSharing {
       conversationId,
       messageCount: sessionData.messages.length
     };
-  }
-
-  /**
-   * Generate QR code for share command
-   * @param {string} command - Command to encode in QR
-   * @returns {Promise<Object>} QR code data (Data URL for web display)
-   */
-  async generateQRCode(command) {
-    try {
-      // Generate QR code as Data URL (for web display)
-      const qrDataUrl = await QRCode.toDataURL(command, {
-        errorCorrectionLevel: 'M',
-        type: 'image/png',
-        width: 300,
-        margin: 2,
-        color: {
-          dark: '#000000',
-          light: '#FFFFFF'
-        }
-      });
-
-      return {
-        dataUrl: qrDataUrl,
-        command: command
-      };
-    } catch (error) {
-      console.warn(chalk.yellow('⚠️  Could not generate QR code:'), error.message);
-      return {
-        dataUrl: null,
-        command: command
-      };
-    }
   }
 
   /**
