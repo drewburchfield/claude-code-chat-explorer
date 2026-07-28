@@ -60,4 +60,43 @@ describe('WebSocketServer.verifyOrigin', () => {
       })
     ).toBe(true);
   });
+
+  // --- normalization and hostile-Origin edge cases ---
+
+  it('matches case-insensitively so an uppercase Host is not falsely rejected', () => {
+    // URL lowercases the host but the raw Host header is not normalized; without
+    // an explicit toLowerCase this legitimate handshake gets rejected.
+    expect(verify(info('http://LOCALHOST:9876', 'LOCALHOST:9876'))).toBe(true);
+    expect(verify(info('http://localhost:9876', 'LOCALHOST:9876'))).toBe(true);
+  });
+
+  it('rejects the literal "null" origin (sandboxed iframe / file:// / data:)', () => {
+    // Browsers send exactly `null` for opaque origins, so this is the most
+    // likely hostile value in practice. It must not be treated as "no Origin".
+    expect(verify(info('null', 'localhost:9876'))).toBe(false);
+  });
+
+  it('rejects when the Host header is absent rather than failing open', () => {
+    expect(verify({ origin: 'https://evil.example', req: { headers: {} } })).toBe(false);
+  });
+
+  it('is not fooled by userinfo in the Origin', () => {
+    // new URL('http://localhost:9876@evil.example').host === 'evil.example'
+    expect(verify(info('http://localhost:9876@evil.example', 'localhost:9876'))).toBe(false);
+  });
+
+  it('accepts an IPv6 loopback handshake (bracket form matches the Host header)', () => {
+    expect(verify(info('http://[::1]:9876', '[::1]:9876'))).toBe(true);
+  });
+
+  it('falls back to req.headers.origin when info.origin is absent', () => {
+    // Exercises the second arm of the `||`, which the info() helper otherwise
+    // masks by populating both.
+    expect(
+      verify({ req: { headers: { origin: 'https://evil.example', host: 'localhost:9876' } } })
+    ).toBe(false);
+    expect(
+      verify({ req: { headers: { origin: 'http://localhost:9876', host: 'localhost:9876' } } })
+    ).toBe(true);
+  });
 });

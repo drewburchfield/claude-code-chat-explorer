@@ -56,17 +56,25 @@ class WebSocketServer {
   /**
    * Origin check for incoming WebSocket handshakes (ws `verifyClient`).
    *
-   * A browser always sends an Origin header on a WebSocket handshake; a
-   * non-browser client (native ws, tests, curl) sends none and carries no
-   * ambient-authority CSRF risk, so those are allowed. For browser clients we
-   * require the Origin's host to equal the request Host header (same-origin).
-   * That automatically covers localhost, 127.0.0.1, and a user-opted Cloudflare
-   * tunnel host without hard-coding any of them, while rejecting a socket
-   * opened by a page served from any other site. An explicit
-   * `options.allowedOrigins` list can whitelist additional origins.
+   * This is CSRF protection, not authentication. A browser always sends an
+   * Origin header on a WebSocket handshake; a non-browser client (native ws,
+   * tests, curl) sends none and carries no ambient-authority risk, so those are
+   * allowed — this check deliberately does not try to stop a direct client.
+   *
+   * For browser clients we require the Origin's host to equal the request Host
+   * header. That is same host-and-port; scheme is not compared, because a
+   * Cloudflare tunnel terminates TLS and the origin server sees plain http. It
+   * covers localhost, 127.0.0.1, and a user-opted tunnel host without
+   * hard-coding any of them, and rejects a socket opened by a page served from
+   * another site. It does NOT defend against DNS rebinding, which produces a
+   * matching Origin/Host pair; that needs a Host allowlist, which belongs at a
+   * shared layer since the HTTP API is unauthenticated on the same interface.
+   *
+   * An explicit `options.allowedOrigins` list can whitelist additional origins.
    *
    * @param {{origin?: string, req: import('http').IncomingMessage}} info
-   * @returns {boolean} true to accept the handshake, false to reject (403)
+   * @returns {boolean} true to accept the handshake, false to reject (ws aborts
+   *   a rejected single-arity verifyClient handshake with HTTP 401)
    */
   verifyOrigin(info) {
     const req = info && info.req;
@@ -76,8 +84,11 @@ class WebSocketServer {
     if (!origin) return true;
 
     try {
-      const originHost = new URL(origin).host;
-      const hostHeader = req && req.headers && req.headers.host;
+      // URL lowercases the host; the raw Host header is not normalized, so
+      // compare case-insensitively or a legitimate "Host: LOCALHOST:9876"
+      // handshake would be rejected.
+      const originHost = new URL(origin).host.toLowerCase();
+      const hostHeader = (req && req.headers && req.headers.host || '').toLowerCase();
 
       if (hostHeader && originHost === hostHeader) return true;
 
