@@ -136,6 +136,16 @@ class Indexer {
       console.log(chalk.green(`✅ Indexing complete in ${duration}s`));
       console.log(chalk.gray(`   Indexed: ${stats.filesIndexed}, Skipped: ${stats.filesSkipped}, Removed: ${stats.filesRemoved}, Errors: ${stats.errors}`));
 
+      // Merge FTS segments after a pass that actually wrote something. Each
+      // re-index is a delete+reinsert and contentless_delete accumulates
+      // tombstones, so without this the segment count grows and queries drift
+      // slower over time. Skipped when nothing changed, so the common no-op
+      // pass stays a no-op.
+      if ((stats.filesIndexed > 0 || stats.filesRemoved > 0) &&
+          typeof this.db.optimizeSearchIndex === 'function') {
+        this.db.optimizeSearchIndex();
+      }
+
       return stats;
 
     } catch (err) {

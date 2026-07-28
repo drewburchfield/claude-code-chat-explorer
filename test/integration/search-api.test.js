@@ -166,6 +166,19 @@ describe('SearchService REST surface', () => {
       expect(res.body.nextCursor).toBeNull();
     });
 
+    it('rejects `page`, which was never implemented, instead of ignoring it', async () => {
+      // Honouring `limit` while silently dropping `page` returned page 0 every
+      // time, under a per-page cache key.
+      await request(app.app).get('/api/conversations?page=2&limit=5').expect(400);
+    });
+
+    it('rejects paging combined with includeSubagents', async () => {
+      // Grouping interleaves parents with children; the (lastModified, id)
+      // order paging needs scatters them, so a page could hold a parent stub
+      // whose children are on another page.
+      await request(app.app).get('/api/conversations?limit=5&includeSubagents=true').expect(400);
+    });
+
     it('rejects a malformed cursor instead of silently returning everything', async () => {
       // Without the guard a bad cursor parsed to NaN, every comparison was
       // false, and the caller got the whole list back looking like a page.

@@ -214,6 +214,15 @@ class DatabaseManager {
         )
       `);
 
+      // High-water mark so conv_no is never reused after a delete (see the
+      // allocation query in upsertConversation for why reuse is hazardous).
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS conv_seq_meta (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        )
+      `);
+
       // Conversation-level index, kept alongside message_fts for one capability
       // message_fts cannot provide: matching terms that appear in DIFFERENT
       // messages of the same conversation ("foo AND bar", NEAR). A MATCH on
@@ -457,6 +466,67 @@ class DatabaseManager {
    * @param {number} size - File size in bytes
    * @returns {boolean} True if file needs indexing
    */
+  /**
+   * True while any indexed file is still recorded at an older content version,
+   * i.e. a schema-bump rebuild has not finished.
+   *
+   * Search is answered from a partially rebuilt index during that window, so
+   * every surface needs to say so rather than returning quietly short results.
+   * One indexed lookup; safe to call per search.
+   *
+   * @returns {boolean}
+   */
+  /**
+   * Merge FTS5 segments after a bulk indexing pass.
+   *
+   * Every re-index deletes and reinserts a conversation's rows, and
+   * contentless_delete=1 accumulates tombstones, so segment count grows and
+   * query performance drifts down over time. There was no maintenance of any
+   * kind before this. 'merge' is incremental and safe to interrupt, unlike a
+   * full 'optimize' which can run for a long time on a large index.
+   *
+   * @returns {boolean} true if the merge ran
+   */
+  /**
+   * Record a freed conv_no so it is never handed out again.
+   * @param {number} convNo
+   * @private
+   */
+  _raiseConvSeqHighWater(convNo) {
+    try {
+      this.db.prepare(`
+        INSERT INTO conv_seq_meta (key, value) VALUES ('high_water', ?)
+        ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), excluded.value)
+      `).run(String(convNo));
+    } catch { /* best-effort; allocation still works off MAX(conv_no) */ }
+  }
+
+  optimizeSearchIndex() {
+    try {
+      this.db.prepare(`INSERT INTO message_fts(message_fts, rank) VALUES('merge', ?)`).run(16);
+      this.db.prepare(`INSERT INTO conversation_fts(conversation_fts, rank) VALUES('merge', ?)`).run(16);
+      return true;
+    } catch (err) {
+      // Maintenance is best-effort: a failure here degrades performance over
+      // time but never correctness, so it must not fail an indexing pass.
+      console.warn(chalk.yellow(`⚠️ FTS merge skipped: ${err.message}`));
+      return false;
+    }
+  }
+
+  hasPendingRebuild() {
+    try {
+      const row = this.db.prepare(
+        `SELECT 1 FROM file_index WHERE content_version < ? LIMIT 1`
+      ).get(CONTENT_VERSION);
+      return !!row;
+    } catch {
+      // A missing column or unreadable table is itself a reason not to claim
+      // the index is complete.
+      return true;
+    }
+  }
+
   needsIndexing(filePath, mtime, size) {
     const stmt = this.db.prepare(`
       SELECT mtime, size, content_version FROM file_index WHERE file_path = ?
@@ -505,9 +575,19 @@ class DatabaseManager {
     // conv_no is allocated once per conversation and never reused, so the
     // conversation_fts rowid stays stable across re-indexes.
     const getConvNo = this.db.prepare(`SELECT conv_no FROM conv_seq WHERE conversation_id = ?`);
+    // Monotonic, never reused. MAX(conv_no)+1 hands a freed number to the next
+    // conversation after a delete. No orphan is reachable today (every deletion
+    // path removes the conversation_fts row before the conv_seq row), but a
+    // contentless FTS5 table silently accepts a second INSERT at an existing
+    // rowid and a single DELETE then removes only the newer one. If that
+    // invariant ever broke, the residue would attach to a reused conv_no and
+    // surface as another conversation's content. A high-water mark removes the
+    // hazard entirely.
     const allocConvNo = this.db.prepare(`
       INSERT INTO conv_seq (conversation_id, conv_no)
-      VALUES (?, (SELECT COALESCE(MAX(conv_no), 0) + 1 FROM conv_seq))
+      VALUES (?, (SELECT COALESCE(MAX(hw), 0) + 1 FROM
+                   (SELECT MAX(conv_no) AS hw FROM conv_seq
+                    UNION ALL SELECT CAST(value AS INTEGER) FROM conv_seq_meta WHERE key = 'high_water')))
     `);
     // Addressed by rowid, so the constraint is consumed instead of scanning.
     const deleteConvFts = this.db.prepare(`DELETE FROM conversation_fts WHERE rowid = ?`);
@@ -777,22 +857,24 @@ class DatabaseManager {
       // Joining through `messages` makes the conversation filter index-driven,
       // and dropping ORDER BY bm25 removes a temp b-tree sort: any matching
       // message is an acceptable preview.
+      // snippet() is only valid when the FTS table is the direct subject of the
+      // query; a JOIN with GROUP BY raises "unable to use function snippet in
+      // the requested context". Constrain by rowid instead, which FTS5 CAN
+      // consume (INDEX 0:= / 0:><), with the candidate rowids coming from the
+      // indexed messages table. Each lookup is then index-driven on both sides
+      // rather than scanning every message matching the term.
+      const snippetStmt = this.db.prepare(`
+        SELECT snippet(message_fts, 4, '{{MATCH}}', '{{/MATCH}}', '...', 20) AS snippet
+        FROM message_fts
+        WHERE message_fts MATCH ?
+          AND rowid IN (SELECT id FROM messages WHERE conversation_id = ?)
+        LIMIT 1
+      `);
       const snippetsFor = (ids) => {
         const out = new Map();
-        if (!ids.length) return out;
-        const CHUNK = 400; // keep well under SQLITE_MAX_VARIABLE_NUMBER
-        for (let i = 0; i < ids.length; i += CHUNK) {
-          const slice = ids.slice(i, i + CHUNK);
-          const placeholders = slice.map(() => '?').join(',');
-          const rows = this.db.prepare(`
-            SELECT m.conversation_id AS cid,
-                   snippet(message_fts, 4, '{{MATCH}}', '{{/MATCH}}', '...', 20) AS snippet
-            FROM message_fts
-            JOIN messages m ON m.id = message_fts.rowid
-            WHERE message_fts MATCH ? AND m.conversation_id IN (${placeholders})
-            GROUP BY m.conversation_id
-          `).all(safeQuery, ...slice);
-          for (const r of rows) if (!out.has(r.cid)) out.set(r.cid, r.snippet);
+        for (const id of ids) {
+          const r = snippetStmt.get(safeQuery, id);
+          if (r && r.snippet) out.set(id, r.snippet);
         }
         return out;
       };
@@ -1049,6 +1131,7 @@ class DatabaseManager {
       const seq = this.db.prepare('SELECT conv_no FROM conv_seq WHERE conversation_id = ?').get(id);
       if (seq) {
         this.db.prepare('DELETE FROM conversation_fts WHERE rowid = ?').run(seq.conv_no);
+        this._raiseConvSeqHighWater(seq.conv_no);
         this.db.prepare('DELETE FROM conv_seq WHERE conversation_id = ?').run(id);
       }
       this.db.prepare('DELETE FROM tool_usage WHERE conversation_id = ?').run(id);
@@ -1081,6 +1164,7 @@ class DatabaseManager {
         const seq = this.db.prepare('SELECT conv_no FROM conv_seq WHERE conversation_id = ?').get(conv.id);
         if (seq) {
           this.db.prepare('DELETE FROM conversation_fts WHERE rowid = ?').run(seq.conv_no);
+          this._raiseConvSeqHighWater(seq.conv_no);
           this.db.prepare('DELETE FROM conv_seq WHERE conversation_id = ?').run(conv.id);
         }
         this.db.prepare('DELETE FROM tool_usage WHERE conversation_id = ?').run(conv.id);

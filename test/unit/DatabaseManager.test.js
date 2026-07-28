@@ -606,6 +606,41 @@ describe('DatabaseManager', () => {
     });
   });
 
+  describe('search index maintenance and conv_no allocation', () => {
+    it('reports a pending rebuild while any file is below the content version', () => {
+      db.db.prepare(
+        `INSERT OR REPLACE INTO file_index (file_path, mtime, size, indexed_at, content_version) VALUES (?,?,?,?,?)`
+      ).run('/stale2.jsonl', 1, 2, 3, 0);
+      expect(db.hasPendingRebuild()).toBe(true);
+
+      db.db.prepare(`UPDATE file_index SET content_version = 4`).run();
+      expect(db.hasPendingRebuild()).toBe(false);
+    });
+
+    it('never reuses a conv_no after a conversation is removed', () => {
+      const mk = (id) => db.upsertConversation(
+        { id, filePath: `/p/${id}.jsonl`, filename: `${id}.jsonl`, project: 'p',
+          messageCount: 1, fileSize: 1, lastModified: new Date(), created: new Date() },
+        `content for ${id}`
+      );
+      mk('cn-a'); mk('cn-b');
+      const bNo = db.db.prepare(`SELECT conv_no FROM conv_seq WHERE conversation_id='cn-b'`).get().conv_no;
+
+      db.removeConversation('cn-b');
+      mk('cn-c');
+      const cNo = db.db.prepare(`SELECT conv_no FROM conv_seq WHERE conversation_id='cn-c'`).get().conv_no;
+
+      // A freed number must not be handed out again: a stale contentless FTS
+      // row attached to a reused conv_no would surface as another
+      // conversation's content.
+      expect(cNo).toBeGreaterThan(bNo);
+    });
+
+    it('merges FTS segments without throwing', () => {
+      expect(db.optimizeSearchIndex()).toBe(true);
+    });
+  });
+
   describe('FTS content version migration', () => {
     it('initializes a fresh database at the current target version (4)', () => {
       expect(db.db.pragma('user_version', { simple: true })).toBe(4);

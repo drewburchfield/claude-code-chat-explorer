@@ -209,9 +209,11 @@ class ChatsMobile {
 
         let conversations;
         if (this.useDatabaseBackend && this.databaseBackend.isInitialized) {
-          // Get conversations from database with subagent filter
+          // The cap has to exceed the corpus, not just the page. Paging filters
+          // this list in memory, so a fixed 10,000 made every conversation
+          // older than the newest 10,000 permanently unreachable by any cursor.
           conversations = this.databaseBackend.getConversations({
-            limit: 10000,
+            limit: Number.MAX_SAFE_INTEGER,
             includeSubagents
           });
 
@@ -238,6 +240,28 @@ class ChatsMobile {
         const before = typeof req.query.before === 'string' ? req.query.before : null;
         const pageLimit = Number.parseInt(req.query.limit, 10);
         const paging = before !== null || Number.isFinite(pageLimit);
+
+        // Paging and subagent grouping are incompatible: grouping interleaves
+        // each parent with its children, and the (lastModified, id) ordering
+        // paging requires scatters them, so a page could contain a parent stub
+        // whose children sit on another page. Reject rather than return a
+        // silently broken shape.
+        if (paging && includeSubagents) {
+          return res.status(400).json({
+            error: 'Unsupported combination',
+            detail: 'limit/before cannot be combined with includeSubagents; grouping requires the full set.'
+          });
+        }
+
+        // `page` was never implemented here. It is accepted by a frontend
+        // helper, and silently ignoring it while honouring `limit` would return
+        // page 0 for every request.
+        if (req.query.page !== undefined) {
+          return res.status(400).json({
+            error: 'Unsupported parameter',
+            detail: 'Use keyset paging (limit + before) instead of page.'
+          });
+        }
 
         if (paging) {
           // The cursor compares (lastModified, id), so the list has to be

@@ -2261,6 +2261,10 @@
                             <span>Found <span class="search-results-count" id="searchResultsCount">0</span> conversations</span>
                             <button class="clear-filters-btn" id="clearFiltersBtn">Clear filters</button>
                         </div>
+                        <!-- Shown when the index is still being rebuilt or the
+                             search fell back: results are genuinely incomplete,
+                             and a short result list must not look authoritative. -->
+                        <div id="searchDegradedNotice" style="display: none; color: #f0b429; font-size: 12px;"></div>
                         <div id="appliedFilters" style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px;"></div>
                     </div>
                 </div>
@@ -4461,6 +4465,22 @@
                     searchResultsCount.textContent = data.count;
                     this.renderAppliedFilters(filters, appliedFiltersContainer);
                     searchResultsInfo.classList.add('active');
+
+                    // Surface incomplete results. The API has always reported
+                    // searchDegraded/indexState; nothing rendered them, so a
+                    // partially rebuilt index looked like a complete answer.
+                    const degradedNotice = document.getElementById('searchDegradedNotice');
+                    if (degradedNotice) {
+                        const rebuilding = data.indexState && data.indexState !== 'idle';
+                        if (data.searchDegraded || rebuilding) {
+                            degradedNotice.textContent = rebuilding
+                                ? '⚠️ Still indexing - these results are incomplete.'
+                                : '⚠️ Search is degraded - these results may be incomplete.';
+                            degradedNotice.style.display = 'block';
+                        } else {
+                            degradedNotice.style.display = 'none';
+                        }
+                    }
 
                     // Close the search panel
                     this.closeAdvancedSearch();

@@ -131,9 +131,16 @@ class DataService {
    * @param {number} limit - Number of conversations per page
    * @returns {Promise<Object>} Paginated conversations data
    */
-  async getConversationsPaginated(page = 0, limit = 10) {
+  /**
+   * @param {?string} before - Keyset cursor from a previous response's
+   *   nextCursor. The server uses keyset paging, not offsets: a `page` number
+   *   was never implemented there and is now rejected, because honouring
+   *   `limit` while ignoring `page` returned page 0 for every request.
+   */
+  async getConversationsPaginated(before = null, limit = 10) {
     const cacheDuration = this.realTimeEnabled ? 30000 : 5000;
-    return await this.cachedFetch(`/api/conversations?page=${page}&limit=${limit}`, {
+    const cursor = before ? `&before=${encodeURIComponent(before)}` : '';
+    return await this.cachedFetch(`/api/conversations?limit=${limit}${cursor}`, {
       cacheDuration
     });
   }
