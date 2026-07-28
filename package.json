@@ -44,6 +44,9 @@
     "supertest": "^7.0.0",
     "vitest": "^4.1.5"
   },
+  "overrides": {
+    "postcss": "8.5.19"
+  },
   "engines": {
     "node": ">=20 <26"
   }
