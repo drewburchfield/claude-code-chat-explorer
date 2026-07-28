@@ -237,11 +237,30 @@ class ChatsMobile {
         // conversations are being re-indexed underneath it.
         const before = typeof req.query.before === 'string' ? req.query.before : null;
         const pageLimit = Number.parseInt(req.query.limit, 10);
+        const paging = before !== null || Number.isFinite(pageLimit);
+
+        if (paging) {
+          // The cursor compares (lastModified, id), so the list has to be
+          // ordered by exactly that. Neither source guarantees it: the SQL
+          // ORDER BY has no id tie-break, and the in-memory fallback sorts on
+          // lastModified alone. Without this, conversations sharing a timestamp
+          // could be skipped or repeated across pages.
+          conversations = [...conversations].sort((a, b) => {
+            const d = new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime();
+            if (d !== 0) return d;
+            return String(b.id) < String(a.id) ? -1 : String(b.id) > String(a.id) ? 1 : 0;
+          });
+        }
 
         if (before) {
           const sep = before.lastIndexOf('_');
-          const beforeTs = Number(before.slice(0, sep));
-          const beforeId = before.slice(sep + 1);
+          const beforeTs = sep === -1 ? NaN : Number(before.slice(0, sep));
+          const beforeId = sep === -1 ? '' : before.slice(sep + 1);
+          // A malformed cursor must not silently return the whole list as if
+          // paging had been applied.
+          if (!Number.isFinite(beforeTs)) {
+            return res.status(400).json({ error: 'Invalid cursor', detail: 'Expected "<lastModifiedMs>_<id>"' });
+          }
           conversations = conversations.filter(c => {
             const ts = new Date(c.lastModified).getTime();
             return ts < beforeTs || (ts === beforeTs && String(c.id) < beforeId);

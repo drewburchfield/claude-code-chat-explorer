@@ -165,5 +165,28 @@ describe('SearchService REST surface', () => {
       const res = await request(app.app).get('/api/conversations?limit=1000').expect(200);
       expect(res.body.nextCursor).toBeNull();
     });
+
+    it('rejects a malformed cursor instead of silently returning everything', async () => {
+      // Without the guard a bad cursor parsed to NaN, every comparison was
+      // false, and the caller got the whole list back looking like a page.
+      await request(app.app).get('/api/conversations?before=garbage').expect(400);
+    });
+
+    it('walks the entire set without skipping or repeating a row', async () => {
+      const all = await request(app.app).get('/api/conversations').expect(200);
+      const expected = all.body.conversations.length;
+
+      const seen = [];
+      let cursor = null;
+      for (let i = 0; i < 20; i++) {
+        const url = `/api/conversations?limit=1${cursor ? `&before=${encodeURIComponent(cursor)}` : ''}`;
+        const page = await request(app.app).get(url).expect(200);
+        seen.push(...page.body.conversations.map(c => c.id));
+        cursor = page.body.nextCursor;
+        if (!cursor) break;
+      }
+      expect(seen.length).toBe(expected);
+      expect(new Set(seen).size).toBe(expected); // no repeats
+    });
   });
 });

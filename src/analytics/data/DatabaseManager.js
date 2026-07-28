@@ -303,22 +303,35 @@ class DatabaseManager {
       // drop that set explicitly and rebuild it. Only the search tables are
       // touched; conversations, tool_usage, and file_index survive.
       if (current < 4) {
-        this.db.exec(`
-          DROP TRIGGER IF EXISTS messages_ai;
-          DROP TRIGGER IF EXISTS messages_ad;
-          DROP TRIGGER IF EXISTS messages_au;
-          DROP TABLE IF EXISTS conversation_fts;
-          DROP TABLE IF EXISTS message_fts;
-          DROP TABLE IF EXISTS messages;
-          DROP TABLE IF EXISTS conv_seq;
-        `);
-        this._createSearchSchema();
+        // Atomic: SQLite DDL is transactional, so a failure part-way through
+        // rolls the drops back. Without this, a throw between the DROPs and the
+        // rebuild would leave the database with no search tables at all.
+        this.db.transaction(() => {
+          this.db.exec(`
+            DROP TRIGGER IF EXISTS messages_ai;
+            DROP TRIGGER IF EXISTS messages_ad;
+            DROP TRIGGER IF EXISTS messages_au;
+            DROP TABLE IF EXISTS conversation_fts;
+            DROP TABLE IF EXISTS message_fts;
+            DROP TABLE IF EXISTS messages;
+            DROP TABLE IF EXISTS conv_seq;
+          `);
+          this._createSearchSchema();
+        })();
       }
 
       this.db.prepare(`UPDATE file_index SET content_version = 0`).run();
       this.db.pragma(`user_version = ${TARGET_VERSION}`);
     } catch (err) {
-      console.warn(chalk.yellow(`⚠️ FTS content version migration failed: ${err.message}`));
+      // Do NOT reduce this to a warning. Everything above either restructures
+      // the search schema or marks the corpus for re-extraction; continuing
+      // past a failure means serving searches against a schema in an unknown
+      // state, which is exactly the silent degradation this project avoids
+      // elsewhere. user_version is left unbumped so a retry is possible.
+      console.error(chalk.red(`❌ Search schema migration failed: ${err.message}`));
+      console.error(chalk.gray(`   Database: ${this.dbPath}`));
+      console.error(chalk.gray(`   The search index was NOT migrated. Delete the database to rebuild from transcripts.`));
+      throw err;
     }
   }
 
