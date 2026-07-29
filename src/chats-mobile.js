@@ -155,8 +155,7 @@ class ChatsMobile {
   setupMiddleware() {
     // Security headers (defense-in-depth). The viewer renders untrusted
     // transcript content, and startServer() binds every interface (no host arg
-    // on app.listen) with an opt-in Cloudflare tunnel on top, so treat these
-    // as a real control, not decoration.
+    // on app.listen), so treat these as a real control, not decoration.
     //
     // Be honest about what this CSP does and doesn't buy:
     //   - 'unsafe-inline' stays in script-src/style-src because the viewer is
@@ -1693,120 +1692,17 @@ class ChatsMobile {
           this.log('warn', chalk.yellow('⚠️  WebSocket server failed to initialize:', error.message));
         }
         
-        // Setup Cloudflare Tunnel if requested
-        if (this.options.tunnel) {
-          await this.setupCloudflaredTunnel();
-        }
-        
         resolve();
       });
     });
   }
 
   /**
-   * Setup Cloudflare Tunnel for remote access
-   */
-  async setupCloudflaredTunnel() {
-    console.log(chalk.blue('☁️  Setting up Cloudflare Tunnel...'));
-    console.log(chalk.gray(`📡 Tunneling ${this.localUrl}...`));
-    
-    try {
-      const { spawn } = require('child_process');
-      
-      // Spawn cloudflared tunnel with more options for better compatibility
-      const cloudflared = spawn('cloudflared', [
-        'tunnel', 
-        '--url', this.localUrl,
-        '--no-autoupdate'  // Prevent update check that can cause delays
-      ], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, NO_UPDATE_NOTIFIER: '1' } // Disable update notifier
-      });
-      
-      // Store process reference for cleanup
-      this.cloudflaredProcess = cloudflared;
-      
-      // Parse tunnel URL from cloudflared output
-      return new Promise((resolve) => {
-        let output = '';
-        
-        cloudflared.stdout.on('data', (data) => {
-          const str = data.toString();
-          output += str;
-          
-          // Always show cloudflared output for debugging tunnel issues
-          console.log(chalk.gray(`[cloudflared] ${str.trim()}`));
-          
-          // Look for various tunnel URL patterns
-          let urlMatch = str.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/);
-          if (!urlMatch) {
-            // Try alternative patterns
-            urlMatch = str.match(/https:\/\/[a-zA-Z0-9-]+\.cfargotunnel\.com/);
-          }
-          if (!urlMatch) {
-            // Try to find any HTTPS URL in the output
-            urlMatch = str.match(/https:\/\/[a-zA-Z0-9.-]+\.(?:trycloudflare|cfargotunnel)\.com/);
-          }
-          
-          if (urlMatch) {
-            this.tunnelUrl = urlMatch[0];
-            console.log(chalk.green(`☁️  Cloudflare Tunnel ready: ${this.tunnelUrl}`));
-            resolve(this.tunnelUrl);
-          }
-        });
-        
-        cloudflared.stderr.on('data', (data) => {
-          const str = data.toString();
-          // Always show stderr for debugging
-          console.error(chalk.gray(`[cloudflared stderr] ${str.trim()}`));
-          
-          // Sometimes tunnel URLs appear in stderr
-          let urlMatch = str.match(/https:\/\/[a-zA-Z0-9-]+\.(?:trycloudflare|cfargotunnel)\.com/);
-          if (urlMatch && !this.tunnelUrl) {
-            this.tunnelUrl = urlMatch[0];
-            console.log(chalk.green(`☁️  Cloudflare Tunnel ready: ${this.tunnelUrl}`));
-            resolve(this.tunnelUrl);
-          }
-        });
-        
-        cloudflared.on('error', (error) => {
-          console.error(chalk.red('❌ Failed to start Cloudflare Tunnel:'), error.message);
-          console.log(chalk.yellow('💡 Make sure cloudflared is installed: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/'));
-          resolve(null);
-        });
-        
-        cloudflared.on('close', (code) => {
-          console.log(chalk.yellow(`⚠️  Cloudflared process exited with code ${code}`));
-          if (!this.tunnelUrl) {
-            resolve(null);
-          }
-        });
-        
-        // Timeout after 45 seconds (increased from 30)
-        setTimeout(() => {
-          if (!this.tunnelUrl) {
-            console.warn(chalk.yellow('⚠️  Tunnel URL not detected within 45 seconds'));
-            console.log(chalk.gray('Full cloudflared output:'));
-            console.log(chalk.gray(output));
-            console.log(chalk.blue('💡 You can manually run: ') + chalk.white(`cloudflared tunnel --url ${this.localUrl}`));
-            console.log(chalk.blue('   Then copy the tunnel URL and access it in your browser.'));
-            resolve(null);
-          }
-        }, 45000);
-      });
-    } catch (error) {
-      console.error(chalk.red('❌ Error setting up Cloudflare Tunnel:'), error.message);
-      return null;
-    }
-  }
-
-  /**
-   * Open browser to the mobile chats interface
+   * Open browser to the chats interface
    */
   async openBrowser() {
     try {
-      // Use tunnel URL if available, otherwise local URL
-      const url = this.tunnelUrl || this.localUrl || `http://127.0.0.1:${this.port}`;
+      const url = this.localUrl || `http://127.0.0.1:${this.port}`;
       console.log(chalk.cyan(`🌐 Opening browser to ${url}`));
       await open(url);
     } catch (error) {
@@ -1823,15 +1719,6 @@ class ChatsMobile {
       return;
     }
     this.isStopped = true;
-
-    if (this.cloudflaredProcess) {
-      try {
-        this.cloudflaredProcess.kill('SIGTERM');
-        this.log('info', chalk.gray('☁️  Cloudflare Tunnel stopped'));
-      } catch (error) {
-        this.log('warn', chalk.yellow('⚠️  Error stopping Cloudflare Tunnel:', error.message));
-      }
-    }
 
     if (this.webSocketServer) {
       try {
@@ -1878,13 +1765,9 @@ async function startChatsMobile(options = {}) {
     
     console.log(chalk.green('✅ Claude Code Chats Mobile is running!'));
     
-    // Show access URLs
+    // Show access URL
     console.log(chalk.cyan(`📱 Local access: ${chatsMobile.localUrl}`));
-    if (chatsMobile.tunnelUrl) {
-      console.log(chalk.cyan(`☁️  Remote access: ${chatsMobile.tunnelUrl}`));
-      console.log(chalk.blue(`🌐 Opening remote URL: ${chatsMobile.tunnelUrl}`));
-    }
-    
+
     console.log(chalk.gray('Press Ctrl+C to stop'));
 
     // Handle graceful shutdown - remove existing listeners first to prevent duplicates

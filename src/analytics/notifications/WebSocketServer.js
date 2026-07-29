@@ -63,9 +63,9 @@ class WebSocketServer {
    *
    * For browser clients we require the Origin's host to equal the request Host
    * header. That is same host-and-port; scheme is not compared, because a
-   * Cloudflare tunnel terminates TLS and the origin server sees plain http. It
-   * covers localhost, 127.0.0.1, and a user-opted tunnel host without
-   * hard-coding any of them, and rejects a socket opened by a page served from
+   * TLS-terminating reverse proxy in front of the app leaves the origin server
+   * seeing plain http. It covers localhost, 127.0.0.1, and any proxy host
+   * without hard-coding them, and rejects a socket opened by a page served from
    * another site. It does NOT defend against DNS rebinding, which produces a
    * matching Origin/Host pair; that needs a Host allowlist, which belongs at a
    * shared layer since the HTTP API is unauthenticated on the same interface.
