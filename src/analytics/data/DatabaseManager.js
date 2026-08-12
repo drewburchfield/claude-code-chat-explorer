@@ -90,9 +90,41 @@ class DatabaseManager {
 
     // Create schema
     this._createSchema();
+    this._startWalCheckpoints();
 
     console.log(`📦 Database initialized at ${this.dbPath}`);
     return this;
+  }
+
+  /**
+   * Keep the WAL from growing without bound.
+   *
+   * WAL mode alone is not enough. SQLite's automatic checkpoint is PASSIVE: if
+   * any reader holds a read mark when it fires, it does nothing and returns
+   * quietly. This process is not the only reader — the web UI, the MCP server
+   * and any external reader share the file — so passive checkpoints get starved.
+   * Observed consequence: the WAL reached 133MB, every read had to walk more
+   * frames, and the event loop pegged at 91% CPU until the server stopped
+   * answering HTTP entirely while still accepting TCP connections.
+   *
+   * A periodic TRUNCATE checkpoint bounds it. TRUNCATE can itself be blocked by
+   * a reader (`busy: 1`), which is fine — the next tick retries, and RESTART is
+   * attempted as a cheaper fallback that still caps reuse.
+   */
+  _startWalCheckpoints(intervalMs = 60_000) {
+    if (this.readonly || this._walTimer) return;
+    this._walTimer = setInterval(() => {
+      try {
+        const [res] = this.db.pragma('wal_checkpoint(TRUNCATE)');
+        if (res && res.busy) this.db.pragma('wal_checkpoint(RESTART)');
+      } catch (err) {
+        // A failed checkpoint is never fatal: the next tick retries, and the
+        // data is already durable in the WAL either way.
+        if (process.env.DEBUG) console.warn(`wal checkpoint skipped: ${err.message}`);
+      }
+    }, intervalMs);
+    // Never hold the process open for a housekeeping timer.
+    this._walTimer.unref?.();
   }
 
   /**
@@ -167,6 +199,7 @@ class DatabaseManager {
           content_version INTEGER DEFAULT 0
         )
       `);
+      this._ensureAppendColumns();
     } catch (err) {
       const sqliteVersion = this.db.pragma('sqlite_version', { simple: true });
       console.error(`❌ Schema creation failed: ${err.message}`);
@@ -633,6 +666,56 @@ class DatabaseManager {
     }
   }
 
+  /**
+   * Columns that let an append be recorded as an append.
+   *
+   * Added without a CONTENT_VERSION bump on purpose: they change nothing about
+   * how content is extracted, so bumping would force a full reindex of the whole
+   * store to gain a fast path. They default to 0, which reads as "no checkpoint
+   * known" — every file therefore takes the full path exactly once more and
+   * records its checkpoint on the way through.
+   * @private
+   */
+  _ensureAppendColumns() {
+    const cols = this.db.prepare(`PRAGMA table_info(file_index)`).all().map(c => c.name);
+    const add = (name, decl) => {
+      if (!cols.includes(name)) this.db.exec(`ALTER TABLE file_index ADD COLUMN ${name} ${decl}`);
+    };
+    // Byte offset of the first not-yet-indexed line. Always on a \n boundary.
+    add('indexed_bytes', 'INTEGER DEFAULT 0');
+    // 1-based transcript line count consumed, so src_line keeps meaning.
+    add('indexed_lines', 'INTEGER DEFAULT 0');
+    // Next message seq to hand out, so seq stays dense and monotonic.
+    add('indexed_seq', 'INTEGER DEFAULT 0');
+    // When the whole-conversation FTS document was last rebuilt.
+    add('fts_refreshed_at', 'INTEGER DEFAULT 0');
+  }
+
+  /**
+   * The append checkpoint for a file, or null when there is no usable one.
+   * The caller decides whether the file is still append-compatible.
+   */
+  getAppendState(filePath) {
+    try {
+      const row = this.db.prepare(`
+        SELECT f.mtime, f.size, f.content_version,
+               f.indexed_bytes, f.indexed_lines, f.indexed_seq, f.fts_refreshed_at,
+               c.id AS conversation_id
+          FROM file_index f
+          LEFT JOIN conversations c ON c.file_path = f.file_path
+         WHERE f.file_path = ?
+      `).get(filePath);
+      if (!row) return null;
+      if ((row.content_version || 0) < CONTENT_VERSION) return null;
+      if (!row.conversation_id) return null;
+      if (!row.indexed_bytes) return null;
+      return row;
+    } catch {
+      // A database without the columns simply has no fast path.
+      return null;
+    }
+  }
+
   needsIndexing(filePath, mtime, size) {
     const stmt = this.db.prepare(`
       SELECT mtime, size, content_version FROM file_index WHERE file_path = ?
@@ -701,9 +784,13 @@ class DatabaseManager {
       INSERT INTO conversation_fts (rowid, content) VALUES (?, ?)
     `);
 
+    // The checkpoint is recorded on the full path too — that is what makes the
+    // next write to this file eligible for the append path.
     const updateFileIndex = this.db.prepare(`
-      INSERT OR REPLACE INTO file_index (file_path, mtime, size, indexed_at, content_version)
-      VALUES (?, ?, ?, ?, ${CONTENT_VERSION})
+      INSERT OR REPLACE INTO file_index
+        (file_path, mtime, size, indexed_at, content_version,
+         indexed_bytes, indexed_lines, indexed_seq, fts_refreshed_at)
+      VALUES (?, ?, ?, ?, ${CONTENT_VERSION}, ?, ?, ?, ?)
     `);
 
     const deleteOldTools = this.db.prepare(`
@@ -787,11 +874,18 @@ class DatabaseManager {
         insertConvFts.run(convNo, searchableContent);
       }
 
-      // Update file tracking
+      // Update file tracking, including the append checkpoint. A caller that
+      // supplies no checkpoint (older callers, tests) stores zeros, which simply
+      // means the next change takes the full path again.
+      const cp = conversation.indexCheckpoint || {};
       updateFileIndex.run(
         conversation.filePath,
         conversation.lastModified?.getTime() || now,
         conversation.fileSize || 0,
+        now,
+        cp.bytes || 0,
+        cp.lines || 0,
+        cp.seq || 0,
         now
       );
 
@@ -822,6 +916,131 @@ class DatabaseManager {
           fc.removed_lines || 0
         );
       }
+    });
+
+    transaction();
+  }
+
+  /**
+   * Record only what was appended to a transcript since the last checkpoint.
+   *
+   * The full path replaces a conversation wholesale: `DELETE FROM messages` then
+   * re-insert every row, each firing the message_fts delete+insert triggers.
+   * Measured on a 5,319-message conversation that is 1,007ms and 30.4MB of WAL —
+   * to record one new message. Appending the two rows that actually arrived is
+   * 0ms and 0MB.
+   *
+   * What this deliberately does NOT do is touch `conversation_fts`. That is one
+   * contentless document holding the whole conversation, so it cannot be
+   * appended to, only rewritten (519ms / 20.3MB on the same conversation). Its
+   * freshness is handled by expiry instead: `fts_refreshed_at` makes the caller
+   * take the full path every few minutes, which rebuilds that document from the
+   * authoritative extraction rather than from anything reconstructed here.
+   * Message-level search (`message_fts`) stays exact and immediate either way.
+   *
+   * @param {Object} conversation - same shape as upsertConversation, but the
+   *   aggregate fields carry only the NEW chunk's contribution
+   * @param {Array} newMessages - per-message records parsed from the new bytes
+   */
+  appendConversation(conversation, newMessages = []) {
+    const now = Date.now();
+    const cp = conversation.indexCheckpoint || {};
+
+    const bumpConv = this.db.prepare(`
+      UPDATE conversations SET
+        message_count = message_count + ?,
+        file_size = ?,
+        last_modified = ?,
+        tokens_total = tokens_total + ?,
+        tokens_input = tokens_input + ?,
+        tokens_output = tokens_output + ?,
+        indexed_at = ?,
+        cwd = COALESCE(cwd, ?),
+        entrypoint = COALESCE(entrypoint, ?),
+        primary_model = COALESCE(?, primary_model)
+      WHERE id = ?
+    `);
+
+    const insertMessage = this.db.prepare(`
+      INSERT INTO messages (conversation_id, seq, src_line, role, tool_name, content)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+
+    // Counts accumulate; a tool seen in this chunk adds to what is already there.
+    const bumpTool = this.db.prepare(`
+      INSERT INTO tool_usage (conversation_id, tool_name, call_count, tool_kind, mcp_server, error_count)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(conversation_id, tool_name) DO UPDATE SET
+        call_count = call_count + excluded.call_count,
+        error_count = error_count + excluded.error_count
+    `);
+
+    const insertFileChange = this.db.prepare(`
+      INSERT INTO file_changes
+        (conversation_id, seq, src_line, path, change_kind, added_lines, removed_lines)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    // fts_refreshed_at is carried forward untouched — this path did not refresh it.
+    const moveCheckpoint = this.db.prepare(`
+      UPDATE file_index SET
+        mtime = ?, size = ?, indexed_at = ?,
+        indexed_bytes = ?, indexed_lines = ?, indexed_seq = ?
+      WHERE file_path = ?
+    `);
+
+    const transaction = this.db.transaction(() => {
+      bumpConv.run(
+        conversation.messageCount || 0,
+        conversation.fileSize || 0,
+        conversation.lastModified?.getTime() || now,
+        conversation.tokenUsage?.total || 0,
+        conversation.tokenUsage?.input || 0,
+        conversation.tokenUsage?.output || 0,
+        now,
+        conversation.cwd || null,
+        conversation.entrypoint || null,
+        conversation.modelInfo?.primaryModel || null,
+        conversation.id
+      );
+
+      for (const m of (newMessages || [])) {
+        if (!m || typeof m.text !== 'string' || !m.text.trim()) continue;
+        insertMessage.run(
+          conversation.id,
+          m.seq,
+          m.src_line ?? null,
+          m.role || 'unknown',
+          m.tool_name || null,
+          m.text
+        );
+      }
+
+      if (conversation.toolUsage && conversation.toolUsage.tools) {
+        const errors = conversation.toolUsage.errors || {};
+        for (const [toolName, count] of Object.entries(conversation.toolUsage.tools)) {
+          const { kind, mcp } = toolKind(toolName);
+          bumpTool.run(conversation.id, toolName, count, kind, mcp, errors[toolName] || 0);
+        }
+      }
+
+      for (const fc of (conversation.fileChanges || [])) {
+        if (!fc || !fc.path || !fc.change_kind) continue;
+        insertFileChange.run(
+          conversation.id, fc.seq ?? null, fc.src_line ?? null,
+          fc.path, fc.change_kind, fc.added_lines || 0, fc.removed_lines || 0
+        );
+      }
+
+      moveCheckpoint.run(
+        conversation.lastModified?.getTime() || now,
+        conversation.fileSize || 0,
+        now,
+        cp.bytes || 0,
+        cp.lines || 0,
+        cp.seq || 0,
+        conversation.filePath
+      );
     });
 
     transaction();
@@ -1505,7 +1724,14 @@ class DatabaseManager {
    * Close database connection
    */
   close() {
+    if (this._walTimer) {
+      clearInterval(this._walTimer);
+      this._walTimer = null;
+    }
     if (this.db) {
+      // A last TRUNCATE on the way out: no readers of ours remain, so this is
+      // the checkpoint most likely to actually land.
+      try { this.db.pragma('wal_checkpoint(TRUNCATE)'); } catch { /* closing anyway */ }
       this.db.close();
       this.db = null;
     }

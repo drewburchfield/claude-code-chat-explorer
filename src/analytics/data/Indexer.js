@@ -11,6 +11,13 @@ const { classifyAgentWorktree } = require('../core/WorktreeClassifier');
 // base64 blob that slipped past the image filter) from bloating the index.
 const BLOCK_CHAR_CAP = 256 * 1024;
 
+// How long a conversation may be maintained by appends alone before the next
+// change is forced down the full path. The append path cannot update
+// `conversation_fts` (one contentless document per conversation, rewritable but
+// not appendable), so this bounds how stale conversation-level search can get.
+// message_fts — what message search actually reads — is exact at all times.
+const FTS_FULL_REFRESH_MS = Number(process.env.CHAT_FTS_REFRESH_MS) || 5 * 60 * 1000;
+
 /**
  * Indexer - Efficiently indexes JSONL conversation files into SQLite database
  *
@@ -194,8 +201,38 @@ class Indexer {
     const baseId = filename.replace('.jsonl', '');
     const id = isSubagent && parentId ? `${parentId}_${baseId}` : baseId;
 
+    // Append fast path: the file grew, nothing before the checkpoint moved, and
+    // the whole-conversation FTS document is not yet due for a rebuild.
+    const state = typeof this.db.getAppendState === 'function'
+      ? this.db.getAppendState(filePath) : null;
+    if (state && await this._canAppend(state, fileStats, filePath)) {
+      const tail = await this._parseJsonlStreaming(filePath, {
+        startByte: state.indexed_bytes,
+        startSeq: state.indexed_seq,
+        startLine: state.indexed_lines,
+        size: fileStats.size
+      });
+      this.db.appendConversation({
+        id,
+        filePath,
+        messageCount: tail.messageCount,
+        fileSize: fileStats.size,
+        lastModified: fileStats.mtime,
+        tokenUsage: tail.tokenUsage,
+        modelInfo: tail.modelInfo,
+        toolUsage: tail.toolUsage,
+        fileChanges: tail.fileChanges,
+        cwd: tail.cwd,
+        entrypoint: tail.entrypoint,
+        indexCheckpoint: { bytes: tail.nextByte, lines: tail.nextLine, seq: tail.nextSeq }
+      }, tail.messages);
+      return;
+    }
+
     // Parse file with streaming to avoid memory issues
-    const parseResult = await this._parseJsonlStreaming(filePath);
+    const parseResult = await this._parseJsonlStreaming(filePath, {
+      startByte: 0, startSeq: 0, startLine: 0, size: fileStats.size
+    });
 
     // Extract project name: prefer cwd from file content, fallback to path decoding
     // Note: subagents spawned from subdirectories will get the subdirectory name initially
@@ -244,15 +281,62 @@ class Indexer {
       parentId
     };
 
+    conversation.indexCheckpoint = {
+      bytes: parseResult.nextByte,
+      lines: parseResult.nextLine,
+      seq: parseResult.nextSeq
+    };
+
     // Insert into database
     this.db.upsertConversation(conversation, parseResult.searchableContent, parseResult.messages);
+  }
+
+  /**
+   * Whether this change can be recorded as a pure append.
+   *
+   * Every condition here is a way the stored offsets could be lying. When any
+   * of them fails the caller takes the full path, which rewrites the
+   * conversation from scratch — so a wrong guess costs one slow index, never a
+   * corrupt one. The FTS expiry doubles as a self-heal: any drift is erased
+   * within FTS_FULL_REFRESH_MS.
+   * @private
+   */
+  async _canAppend(state, fileStats, filePath) {
+    // Nothing new.
+    if (!(fileStats.size > state.indexed_bytes)) return false;
+    // Truncated or rewritten shorter — offsets are meaningless.
+    if (fileStats.size < state.size) return false;
+    if (state.indexed_bytes > fileStats.size) return false;
+    // The whole-conversation FTS document is rebuilt on the full path only.
+    if (Date.now() - (state.fts_refreshed_at || 0) >= FTS_FULL_REFRESH_MS) return false;
+    // The stored offset must still sit immediately after a newline; a file
+    // rewritten in place would almost always fail this.
+    return this._isNewlineBefore(filePath, state.indexed_bytes);
+  }
+
+  /** @private */
+  async _isNewlineBefore(filePath, offset) {
+    if (offset <= 0) return false;
+    const fd = await fs.open(filePath, 'r');
+    try {
+      const buf = Buffer.alloc(1);
+      await fs.read(fd, buf, 0, 1, offset - 1);
+      return buf[0] === 0x0a;
+    } finally {
+      await fs.close(fd);
+    }
   }
 
   /**
    * Parse JSONL file using streaming to avoid memory issues
    * @private
    */
-  async _parseJsonlStreaming(filePath) {
+  /**
+   * @param {Object} [range] - {startByte, startSeq, startLine} to parse only an
+   *   appended tail. Omitted, the whole file is parsed as before.
+   * @private
+   */
+  async _parseJsonlStreaming(filePath, range = null) {
     return new Promise((resolve, reject) => {
       const result = {
         messageCount: 0,
@@ -272,14 +356,25 @@ class Indexer {
       // attributed to the right tool. Correlation is by id, never by array
       // order: one user message can carry several tool_result blocks.
       const toolUseNames = new Map();
-      let msgSeq = 0;
+      // Seeded from the checkpoint on the append path so seq stays dense and
+      // src_line keeps pointing at the right transcript line.
+      let msgSeq = range?.startSeq || 0;
       let fcSeq = 0;
       const modelCounts = {};
-      let lineCount = 0;
+      let lineCount = range?.startLine || 0;
       let parseErrorCount = 0;
       const filename = path.basename(filePath);
 
-      const readStream = fs.createReadStream(filePath, { encoding: 'utf8' });
+      // Byte accounting for the resume checkpoint. `consumed` counts the \n that
+      // readline strips; a final line without one makes it overshoot by 1, which
+      // the clamp at close corrects.
+      let consumed = range?.startByte || 0;
+      let lineStart = consumed;
+      let tailIsComplete = true;
+
+      const readStream = range
+        ? fs.createReadStream(filePath, { encoding: 'utf8', start: range.startByte })
+        : fs.createReadStream(filePath, { encoding: 'utf8' });
       const rl = readline.createInterface({
         input: readStream,
         crlfDelay: Infinity
@@ -293,6 +388,12 @@ class Indexer {
 
       rl.on('line', (line) => {
         lineCount++;
+        lineStart = consumed;
+        consumed += Buffer.byteLength(line, 'utf8') + 1;
+        // A line that does not parse is either corrupt or still being written.
+        // Either way the checkpoint must stay behind it, so the next pass sees
+        // it again once it is whole.
+        tailIsComplete = true;
         if (!line.trim()) return;
 
         try {
@@ -399,6 +500,8 @@ class Indexer {
             }
           }
         } catch (parseErr) {
+          // Unparseable: keep the checkpoint behind this line (see above).
+          tailIsComplete = false;
           // Log parse errors with context (limit to avoid spam)
           parseErrorCount++;
           if (parseErrorCount <= 3) {
@@ -427,6 +530,15 @@ class Indexer {
         // on-disk text. Per-block 256KB ceiling still guards pathological blobs.
         result.searchableContent = contentParts.join('\n');
         result.messages = messageRecords;
+        // Where the next parse should resume, and the seq/line it should use.
+        // A file whose last line carries no trailing newline is complete, not
+        // partial — `consumed` merely overshoots by the newline that was never
+        // there, so it is clamped to the real size.
+        result.nextSeq = msgSeq;
+        result.nextLine = lineCount;
+        result.nextByte = tailIsComplete
+          ? (range?.size != null ? Math.min(consumed, range.size) : consumed)
+          : lineStart;
 
         resolve(result);
       });
