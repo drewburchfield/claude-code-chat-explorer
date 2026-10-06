@@ -241,6 +241,7 @@ class Indexer {
       isSubagent: isSubagent || isWorktreeAgent,
       isWorktreeAgent,
       entrypoint: parseResult.entrypoint,
+      title: parseResult.title,
       parentId
     };
 
@@ -263,6 +264,7 @@ class Indexer {
         searchableContent: '',
         messages: [],   // per-message records for role/tool-granular FTS
         cwd: null,  // Extract working directory for project name
+        title: null,  // latest custom-title (user rename) else ai-title
         entrypoint: null  // "cli" | "claude-desktop" | "sdk-cli" | "sdk-py" | ...
       };
 
@@ -313,6 +315,14 @@ class Indexer {
           // are headless SDK or `claude -p` invocations). First seen wins.
           if (!result.entrypoint && item.entrypoint) {
             result.entrypoint = item.entrypoint;
+          }
+
+          // Title records are appended on every rename/regeneration: last wins,
+          // and a user-set custom-title outranks the generated ai-title.
+          if (item.type === 'custom-title' && item.customTitle) {
+            result.title = item.customTitle; result.customTitled = true;
+          } else if (item.type === 'ai-title' && item.aiTitle && !result.customTitled) {
+            result.title = item.aiTitle;
           }
 
           // Only count user/assistant messages

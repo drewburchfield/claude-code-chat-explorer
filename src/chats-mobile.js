@@ -327,6 +327,7 @@ class ChatsMobile {
             isWorktreeAgent: c.isWorktreeAgent,
             isHeadless: c.isHeadless,
             entrypoint: c.entrypoint,
+            title: c.title,
             parentId: c.parentId,
             isStub: c.isStub,
             subagentCount: c.subagentCount,

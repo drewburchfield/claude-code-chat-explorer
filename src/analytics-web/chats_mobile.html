@@ -1054,6 +1054,13 @@
             margin-bottom: 4px;
         }
 
+        .conversation-id {
+            font-size: 0.7rem;
+            color: var(--text-muted, #6b7280);
+            font-family: ui-monospace, monospace;
+            opacity: 0.8;
+        }
+
         .conversation-name {
             font-weight: 600;
             color: var(--text-primary);
@@ -3352,7 +3359,8 @@
                                 </div>
                                 <div class="conversation-content">
                                     <div class="conversation-header">
-                                        <div class="conversation-name">Session ${conversationId}</div>
+                                        <div class="conversation-name">${this.escapeHtml(conv.title || 'Session ' + conversationId)}</div>
+                                        ${conv.title ? `<span class="conversation-id">${conversationId}</span>` : ''}
                                         ${sourceBadge}${subagentBadge}${subagentCount}
                                         <div class="conversation-time">${lastActivity}</div>
                                     </div>
@@ -3491,8 +3499,8 @@
                 // Handle "agent-" prefix IDs to avoid displaying "-" as first character
                 const baseConvId = conversation.id.startsWith('agent-') ? conversation.id.slice(6) : conversation.id;
                 const convId = baseConvId.slice(-8);
-                chatViewTitle.textContent = projectName;
-                chatViewSubtitle.textContent = `Session ${convId}`;
+                chatViewTitle.textContent = conversation.title || projectName;
+                chatViewSubtitle.textContent = conversation.title ? `${projectName} · ${convId}` : `Session ${convId}`;
                 
                 // Show chat view with animation
                 chatView.classList.add('active');
@@ -4456,7 +4464,7 @@
 
                     const project = document.createElement('span');
                     project.className = 'search-result-project';
-                    project.textContent = projectName;
+                    project.textContent = result.title ? `${result.title} · ${projectName}` : projectName;
 
                     // Add subagent badge if this is a subagent
                     if (result.isSubagent) {

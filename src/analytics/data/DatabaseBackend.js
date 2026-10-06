@@ -400,6 +400,7 @@ class DatabaseBackend {
       isWorktreeAgent: conv.isWorktreeAgent || false,
       // Headless (sdk-*) vs interactive (cli / claude-desktop) invocation.
       entrypoint: conv.entrypoint || null,
+      title: conv.title || null,
       isHeadless: conv.isHeadless || false,
       parentId: conv.parentId || null
     };
