@@ -21,8 +21,9 @@ const { classifyAgentWorktree } = require('../core/WorktreeClassifier');
  *       error_count, file_changes rows are extracted from edit tools, and
  *       messages carry src_line transcript provenance. Data is produced at
  *       parse time, so every file must re-index to populate it.
+ *   6 = conversations.title (custom-title/ai-title records)
  */
-const CONTENT_VERSION = 5;
+const CONTENT_VERSION = 6;
 
 /**
  * The canonical-session predicate: aggregates that describe "my conversations"
@@ -117,7 +118,8 @@ class DatabaseManager {
           primary_model TEXT,
           indexed_at INTEGER NOT NULL,
           is_worktree_agent INTEGER DEFAULT 0,
-          entrypoint TEXT
+          entrypoint TEXT,
+          title TEXT
         )
       `);
 
@@ -419,6 +421,7 @@ class DatabaseManager {
       addMissing('tool_usage', 'error_count', 'INTEGER DEFAULT 0');
       addMissing('conversations', 'is_worktree_agent', 'INTEGER DEFAULT 0');
       addMissing('conversations', 'entrypoint', 'TEXT');
+      addMissing('conversations', 'title', 'TEXT');
       // messages may not exist yet on a pre-v4 database; _migrateFtsContentVersion
       // rebuilds it (with src_line) in that case.
       const hasMessages = this.db.prepare(
@@ -663,8 +666,8 @@ class DatabaseManager {
       INSERT OR REPLACE INTO conversations (
         id, file_path, filename, project, message_count, file_size,
         last_modified, created, tokens_total, tokens_input, tokens_output,
-        primary_model, indexed_at, is_subagent, parent_id, cwd, is_worktree_agent, entrypoint
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        primary_model, indexed_at, is_subagent, parent_id, cwd, is_worktree_agent, entrypoint, title
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     // Indexed delete on a real table (see _createSchema for why this replaced
@@ -746,7 +749,8 @@ class DatabaseManager {
         conversation.parentId || null,
         conversation.cwd || null,
         conversation.isWorktreeAgent ? 1 : 0,
-        conversation.entrypoint || null
+        conversation.entrypoint || null,
+        conversation.title || null
       );
 
       // Replace this conversation's messages. The delete uses
@@ -856,7 +860,7 @@ class DatabaseManager {
       SELECT
         id, file_path, filename, project, message_count, file_size,
         last_modified, created, tokens_total, tokens_input, tokens_output,
-        primary_model, indexed_at, is_subagent, parent_id, is_worktree_agent, entrypoint
+        primary_model, indexed_at, is_subagent, parent_id, is_worktree_agent, entrypoint, title
       FROM conversations
     `;
 
@@ -910,7 +914,7 @@ class DatabaseManager {
         SELECT
           c.id, c.file_path, c.filename, c.project, c.message_count, c.file_size,
           c.last_modified, c.created, c.tokens_total, c.tokens_input, c.tokens_output,
-          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id, c.is_worktree_agent, c.entrypoint,
+          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id, c.is_worktree_agent, c.entrypoint, c.title,
           bm25(conversation_fts) as relevance
         FROM conversation_fts
         JOIN conv_seq cs ON cs.conv_no = conversation_fts.rowid
@@ -967,7 +971,7 @@ class DatabaseManager {
         SELECT
           c.id, c.file_path, c.filename, c.project, c.message_count, c.file_size,
           c.last_modified, c.created, c.tokens_total, c.tokens_input, c.tokens_output,
-          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id, c.is_worktree_agent, c.entrypoint,
+          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id, c.is_worktree_agent, c.entrypoint, c.title,
           bm25(conversation_fts) as relevance
         FROM conversation_fts
         JOIN conv_seq cs ON cs.conv_no = conversation_fts.rowid
@@ -1105,7 +1109,7 @@ class DatabaseManager {
         SELECT
           c.id, c.file_path, c.filename, c.project, c.message_count, c.file_size,
           c.last_modified, c.created, c.tokens_total, c.tokens_input, c.tokens_output,
-          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id, c.is_worktree_agent, c.entrypoint,
+          c.primary_model, c.indexed_at, c.is_subagent, c.parent_id, c.is_worktree_agent, c.entrypoint, c.title,
           bm25(message_fts) AS relevance,
           snippet(message_fts, 4, '{{MATCH}}', '{{/MATCH}}', '...', 20) AS snippet,
           message_fts.role AS matched_role, message_fts.seq AS matched_seq
@@ -1454,6 +1458,7 @@ class DatabaseManager {
       // SDK) are headless invocations; "cli" and "claude-desktop" are
       // interactive. The raw value is kept so new entrypoints stay visible.
       entrypoint: row.entrypoint || null,
+      title: row.title || null,
       isHeadless: typeof row.entrypoint === 'string' && row.entrypoint.startsWith('sdk'),
       parentId: row.parent_id || null
     };
